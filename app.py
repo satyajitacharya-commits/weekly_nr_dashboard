@@ -23,15 +23,12 @@ st.sidebar.header("Dashboard Settings")
 forecast_version = st.sidebar.selectbox("Forecast Version", ["Budget", "2_10", "5_7", "8_4"])
 as_of_date = st.sidebar.date_input("As-Of Date", datetime.date(2026, 3, 17))
 
-# --- 1. ADDITION: LAST REFRESHED INFO ---
+# --- 1. FIXED: LAST REFRESHED INFO ---
 pt = pytz.timezone('America/Los_Angeles')
 refresh_time = datetime.datetime.now(pt).strftime("%Y-%m-%d %I:%M %p")
-#user_name = getpass.getuser()
-#user_name = st.experimental_user.get("email", "Local User")
-#user_name = st.user.get("email", "Local User")
 
 st.sidebar.markdown(f"**Last Sync:** `{refresh_time} PT`")
-#st.sidebar.markdown(f"**Refreshed By:** `{user_name}`")
+# Refreshed By removed as requested to clean up sidebar
 
 start_of_month = as_of_date.replace(day=1)
 days_in_month = calendar.monthrange(as_of_date.year, as_of_date.month)[1]
@@ -188,27 +185,30 @@ sec3['VtB'] = np.where(sec3['Budget'] == 0, 0, (sec3['Actual'] / sec3['Budget'])
 sec3['VtF'] = np.where(sec3['Forecast'] == 0, 0, (sec3['Actual'] / sec3['Forecast']) - 1)
 sec3['ACT=FCST OVERRIDE'] = override_mask  
 
-for df in [sec1, sec2, sec3]:
-    df.loc['Total Money Management'] = df.drop(['Total Money Management', 'ACT=FCST OVERRIDE'], errors='ignore').sum(numeric_only=True)
+# --- FIXED LINE 192: IGNORE NON-NUMERIC COLUMNS ---
+for df_temp in [sec1, sec2, sec3]:
+    numeric_cols = df_temp.select_dtypes(include=[np.number]).columns
+    df_temp.loc['Total Money Management', numeric_cols] = df_temp.drop('Total Money Management', errors='ignore')[numeric_cols].sum()
 
-for df in [sec1, sec3]:
-    tot_act = df.loc['Total Money Management', 'Actual']
-    tot_bud = df.loc['Total Money Management', 'Budget']
-    tot_fct = df.loc['Total Money Management', 'Forecast']
-    df.loc['Total Money Management', 'VtB'] = (tot_act / tot_bud) - 1 if tot_bud != 0 else 0
-    df.loc['Total Money Management', 'VtF'] = (tot_act / tot_fct) - 1 if tot_fct != 0 else 0
+for df_temp in [sec1, sec3]:
+    tot_act = df_temp.loc['Total Money Management', 'Actual']
+    tot_bud = df_temp.loc['Total Money Management', 'Budget']
+    tot_fct = df_temp.loc['Total Money Management', 'Forecast']
+    df_temp.loc['Total Money Management', 'VtB'] = (tot_act / tot_bud) - 1 if tot_bud != 0 else 0
+    df_temp.loc['Total Money Management', 'VtF'] = (tot_act / tot_fct) - 1 if tot_fct != 0 else 0
 
 implied_budget = sec2.loc['Total Money Management', 'Budget']
 implied_vtb_total = sec3.loc['Total Money Management', 'VtB']
 implied_actual = implied_budget * (1 + implied_vtb_total)
 implied_forecast = sec2.loc['Total Money Management', 'Budget'] if forecast_version == "Budget" else sec2.loc['Total Money Management', forecast_version]
 
-implied_row = pd.Series({
+# --- FIXED CONCATENATION FOR STABILITY ---
+implied_row = pd.DataFrame([{
     "Actual": implied_actual, "Budget": implied_budget, "Forecast": implied_forecast,
-    "VtB": "", "VtF": "", "ACT=FCST OVERRIDE": None
-}, name="Implied End of Month")
+    "VtB": np.nan, "VtF": np.nan, "ACT=FCST OVERRIDE": False
+}], index=["Implied End of Month"])
 
-sec3 = pd.concat([sec3, implied_row.to_frame().T])
+sec3 = pd.concat([sec3, implied_row])
 sec3.loc['Total Money Management', 'ACT=FCST OVERRIDE'] = False
 
 # Scale to Millions
@@ -219,7 +219,7 @@ for col in ['1-Times', 'Budget', '2_10', '5_7', '8_4', 'Rolling']:
     sec2[col] = sec2[col] / 1000000
 
 # Copy unformatted data for charts
-chart_df = sec3.copy().drop([ 'Implied End of Month'], errors='ignore').reset_index(names='Product')
+chart_df = sec3.copy().drop(['Implied End of Month'], errors='ignore').reset_index(names='Product')
 
 sec1.reset_index(names='Product', inplace=True)
 sec2.reset_index(names='Product', inplace=True)
@@ -256,18 +256,16 @@ if not df_daily.empty:
 else:
     wow_df = pd.DataFrame(columns=['Product', 'Prev Week', 'Current Week', 'Week Delta', 'WoW %', 'Trend'])
     
-# --- FORMATTING RULES & BOLD ROW INJECTION ---
+# --- FORMATTING RULES ---
 def fmt_m(val):
-    if val == "" or val is None: return ""
-    if pd.isna(val) or val == "na": return "$0.0M"
+    if val == "" or val is None or pd.isna(val): return "$0.0M"
     try: return f"${float(val):.1f}M"
     except: return "$0.0M"
 
 def fmt_p(val):
-    if val == "" or val is None: return ""
-    if pd.isna(val) or val == "na": return "0.0%"
+    if val == "" or val is None or pd.isna(val): return "0%"
     try: return f"{float(val) * 100:.0f}%"
-    except: return "0.0%"
+    except: return "0%"
 
 def color_variances(val):
     try:
@@ -321,14 +319,20 @@ with tab1:
         column_config={"ACT=FCST OVERRIDE": st.column_config.CheckboxColumn("ACT=FCST OVERRIDE", default=False)},
         disabled=['Product', 'Actual', 'Budget', 'Forecast', 'VtB', 'VtF'],
         hide_index=True,
-        use_container_width=True
+        use_container_width=True,
+        key="editor_sec3"
     )
     
+    # --- FIXED: PREVENT INFINITE RERUN ---
     new_checkboxes = edited_sec3['ACT=FCST OVERRIDE'].tolist()
+    changed = False
     for i, prod in enumerate(product_order[:-1]): 
-        if new_checkboxes[i] != st.session_state.overrides[prod]:
+        if new_checkboxes[i] != st.session_state.overrides.get(prod, False):
             st.session_state.overrides[prod] = new_checkboxes[i]
-            st.rerun()
+            changed = True
+    
+    if changed:
+        st.rerun()
 
 with tab2:
     st.markdown("### **Week-on-Week Progression ($M)**")
@@ -350,7 +354,7 @@ with tab2:
         st.plotly_chart(fig1, use_container_width=True)
 
     with col2:
-        chart_df['Var_Chart'] = chart_df[var_col] * 100
+        chart_df['Var_Chart'] = pd.to_numeric(chart_df[var_col], errors='coerce').fillna(0) * 100
         fig2 = px.bar(chart_df, x='Var_Chart', y='Product', orientation='h', title=f"MTD Variance ({var_name} %)", text=chart_df['Var_Chart'].apply(lambda x: f"{x:.1f}%"), color=np.where(chart_df['Var_Chart'] >= 0, 'Favorable', 'Unfavorable'), color_discrete_map={'Favorable': '#388e3c', 'Unfavorable': '#d32f2f'})
         fig2.update_traces(textposition="outside", cliponaxis=False)
         st.plotly_chart(fig2, use_container_width=True)
