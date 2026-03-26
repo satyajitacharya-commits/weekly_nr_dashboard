@@ -27,10 +27,11 @@ as_of_date = st.sidebar.date_input("As-Of Date", datetime.date(2026, 3, 17))
 pt = pytz.timezone('America/Los_Angeles')
 refresh_time = datetime.datetime.now(pt).strftime("%Y-%m-%d %I:%M %p")
 #user_name = getpass.getuser()
-user_name = st.experimental_user.get("email", "Local User")
+#user_name = st.experimental_user.get("email", "Local User")
+user_name = st.user.get("email", "Local User")
 
 st.sidebar.markdown(f"**Last Sync:** `{refresh_time} PT`")
-st.sidebar.markdown(f"**Refreshed By:** `{user_name}`")
+#st.sidebar.markdown(f"**Refreshed By:** `{user_name}`")
 
 start_of_month = as_of_date.replace(day=1)
 days_in_month = calendar.monthrange(as_of_date.year, as_of_date.month)[1]
