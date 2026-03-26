@@ -1,5 +1,6 @@
 import gdown
 import os
+import time
 
 # --- 1. MAPPING GOOGLE DRIVE FILE IDs TO YOUR LOCAL NAMES ---
 # To get the ID: Right-click file in Drive -> Share -> Copy Link. 
@@ -13,23 +14,32 @@ file_mapping = {
     "10fufMF52IhxqkrV6cA8TMNOnZ_x6wz6i": "gross_data_bridge_other.csv"
 }
 def download_latest_data():
-    print("🚀 Starting secure data pull from Google Drive...")
+    print("🚀 Starting FORCE refresh from Google Drive...")
     
     for file_id, local_name in file_mapping.items():
+        # Remove old file if it exists to force a fresh timestamp
+        if os.path.exists(local_name):
+            os.remove(local_name)
+            print(f"🗑️ Deleted old {local_name}")
+
         url = f'https://drive.google.com/uc?id={file_id}'
-        print(f"📥 Downloading {local_name}...")
         
         try:
-            # This will overwrite the existing local file
-            gdown.download(url, local_name, quiet=False, fuzzy=True)
-            print(f"✅ Successfully updated {local_name}")
+            # Use gdown to download directly
+            gdown.download(url, local_name, quiet=False)
+            
+            # Final check: did it actually create the file?
+            if os.path.exists(local_name):
+                print(f"✅ Created NEW {local_name} - Size: {os.path.getsize(local_name)} bytes")
+            else:
+                print(f"❌ Error: {local_name} was not created.")
+                
         except Exception as e:
             print(f"❌ Failed to download {local_name}: {e}")
         
-        # Wait 2 seconds to avoid Google security blocks
         time.sleep(2)
 
-    print("\n✨ All files processed. Check your folder timestamps!")
+    print("\n✨ Process finished. Check your folder now!")
 
 if __name__ == "__main__":
     download_latest_data()
