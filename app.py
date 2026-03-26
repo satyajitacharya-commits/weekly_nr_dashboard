@@ -24,11 +24,12 @@ forecast_version = st.sidebar.selectbox("Forecast Version", ["Budget", "2_10", "
 as_of_date = st.sidebar.date_input("As-Of Date", datetime.date(2026, 3, 17))
 
 # --- 1. ADDITION: LAST REFRESHED INFO ---
-pst = pytz.timezone('America/Los_Angeles')
-refresh_time = datetime.datetime.now(pst).strftime("%Y-%m-%d %I:%M %p")
-user_name = getpass.getuser()
+pt = pytz.timezone('America/Los_Angeles')
+refresh_time = datetime.datetime.now(pt).strftime("%Y-%m-%d %I:%M %p")
+#user_name = getpass.getuser()
+user_name = session.user.name ...
 
-st.sidebar.markdown(f"**Last Sync:** `{refresh_time} PST`")
+st.sidebar.markdown(f"**Last Sync:** `{refresh_time} PT`")
 st.sidebar.markdown(f"**Refreshed By:** `{user_name}`")
 
 start_of_month = as_of_date.replace(day=1)
