@@ -1,5 +1,4 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import datetime
 import calendar
@@ -16,17 +15,20 @@ warnings.filterwarnings('ignore', category=UserWarning)
 
 st.set_page_config(layout="wide", page_title="Weekly NR Dashboard")
 
+# --- FILE PATH FOR MANUAL INPUTS ---
+MANUAL_FILE = 'data_manual_adj.csv'
+
 # --- UI CONTROLS (Sidebar) ---
 st.sidebar.header("Dashboard Settings")
 forecast_version = st.sidebar.selectbox("Forecast Version", ["Budget", "2_10", "5_7", "8_4"])
 as_of_date = st.sidebar.date_input("As-Of Date", datetime.date(2026, 3, 17))
 
 # --- 1. ADDITION: LAST REFRESHED INFO ---
-ist = pytz.timezone('Asia/Kolkata')
-refresh_time = datetime.datetime.now(ist).strftime("%Y-%m-%d %I:%M %p")
+pst = pytz.timezone('America/Los_Angeles')
+refresh_time = datetime.datetime.now(pst).strftime("%Y-%m-%d %I:%M %p")
 user_name = getpass.getuser()
 
-st.sidebar.markdown(f"**Last Sync:** `{refresh_time} IST`")
+st.sidebar.markdown(f"**Last Sync:** `{refresh_time} PST`")
 st.sidebar.markdown(f"**Refreshed By:** `{user_name}`")
 
 start_of_month = as_of_date.replace(day=1)
@@ -52,16 +54,15 @@ product_file_mapping = {
 
 prod_normalization_map = {k.lower(): k for k in product_order}
 
-# --- DATABASE UPGRADE ---
-def get_db_connection():
-    conn = sqlite3.connect('finance_data.db')
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(manual_one_times)")
-    columns = [col[1] for col in cursor.fetchall()]
-    if 'category' not in columns:
-        cursor.execute("ALTER TABLE manual_one_times ADD COLUMN category TEXT DEFAULT '1-Times'")
-        conn.commit()
-    return conn
+# --- NEW MANUAL DATA LOADER ---
+def load_manual_inputs():
+    if os.path.exists(MANUAL_FILE):
+        df = pd.read_csv(MANUAL_FILE)
+        df['month'] = df['month'].astype(str).str.strip()
+        df['year'] = df['year'].astype(str).str.strip()
+        return df
+    else:
+        return pd.DataFrame(columns=["month", "year", "category", "product", "adjustment_amount", "comment"])
 
 # --- DATA CLEANING ENGINE ---
 def clean_money(series):
@@ -142,21 +143,14 @@ else:
     st.sidebar.markdown(f"**Date Has Actuals:** <span style='color:#721c24; background-color:#f8d7da; padding: 2px 5px; border-radius: 3px; font-weight:bold;'>FALSE</span>", unsafe_allow_html=True)
 st.sidebar.markdown("*If 'FALSE' variances are inaccurate because daily Budget/Forecast and Actuals are not populated for consistent days. Use an earlier As-Of Date.*")
 
-# --- MANUAL INPUTS ---
-conn = get_db_connection()
-try:
-    df_inputs = pd.read_sql_query("SELECT * FROM manual_one_times", conn)
-    df_inputs['month'] = df_inputs['month'].astype(str).str.strip()
-    df_inputs['year'] = df_inputs['year'].astype(str).str.strip()
-    mask = (df_inputs['month'] == str(as_of_date.month)) & (df_inputs['year'] == str(as_of_date.year))
-    current_inputs = df_inputs[mask]
-    
-    one_times_dict = current_inputs[current_inputs['category'] == '1-Times'].groupby('product')['adjustment_amount'].sum().to_dict()
-    stretch_bud_val = current_inputs[(current_inputs['category'] == 'Stretch Budget') & (current_inputs['product'] == 'Stretch')]['adjustment_amount'].sum()
-    bridge_rolling_val = current_inputs[(current_inputs['category'] == 'Bridge Rolling') & (current_inputs['product'] == 'Bridge')]['adjustment_amount'].sum()
-except:
-    one_times_dict, stretch_bud_val, bridge_rolling_val = {}, 0.0, 0.0
-conn.close()
+# --- MANUAL INPUTS FROM CSV ---
+df_inputs = load_manual_inputs()
+mask = (df_inputs['month'] == str(as_of_date.month)) & (df_inputs['year'] == str(as_of_date.year))
+current_inputs = df_inputs[mask]
+
+one_times_dict = current_inputs[current_inputs['category'] == '1-Times'].groupby('product')['adjustment_amount'].sum().to_dict()
+stretch_bud_val = current_inputs[(current_inputs['category'] == 'Stretch Budget') & (current_inputs['product'] == 'Stretch')]['adjustment_amount'].sum()
+bridge_rolling_val = current_inputs[(current_inputs['category'] == 'Bridge Rolling') & (current_inputs['product'] == 'Bridge')]['adjustment_amount'].sum()
 
 # --- DATA PROCESSING ---
 sec1 = df_mtd.copy()
@@ -223,7 +217,6 @@ for col in ['1-Times', 'Budget', '2_10', '5_7', '8_4', 'Rolling']:
     sec2[col] = sec2[col] / 1000000
 
 # Copy unformatted data for charts
-# --- 1. ADDITION: Include Total Money Management in Chart DF ---
 chart_df = sec3.copy().drop([ 'Implied End of Month'], errors='ignore').reset_index(names='Product')
 
 sec1.reset_index(names='Product', inplace=True)
@@ -285,7 +278,6 @@ def color_variances(val):
         return ''
 
 def highlight_totals(row):
-    # This specifically checks if the row is a "Total" row and applies bold formatting
     if row['Product'] in ['Total Money Management', 'Implied End of Month']:
         return ['font-weight: bold; background-color: #f1f3f4;'] * len(row)
     return [''] * len(row)
@@ -293,7 +285,6 @@ def highlight_totals(row):
 format_dict_sec13 = {'Actual': fmt_m, 'Budget': fmt_m, 'Forecast': fmt_m, 'VtB': fmt_p, 'VtF': fmt_p}
 format_dict_sec2 = {'1-Times': fmt_m, 'Budget': fmt_m, '2_10': fmt_m, '5_7': fmt_m, '8_4': fmt_m, 'Rolling': fmt_m}
 
-# Forces everything (Headers and Cells) to be Bold and Centered
 table_styles = [
     dict(selector="th", props=[("text-align", "center"), ("font-weight", "bold"), ("font-size", "14px")]),
     dict(selector="td", props=[("text-align", "center"),("font-size", "12px"),("min-width", "80px"),("width", "80px")])
@@ -331,15 +322,8 @@ with tab1:
         use_container_width=True
     )
     
-    #new_checkboxes = edited_sec3['ACT=FCST OVERRIDE'].tolist()[:-1] 
-    #if new_checkboxes != override_mask:
-        #for i, prod in enumerate(product_order):
-            #st.session_state.overrides[prod] = new_checkboxes[i]
-        #st.rerun()
-
     new_checkboxes = edited_sec3['ACT=FCST OVERRIDE'].tolist()
-    # Logic to update state based on editable product rows
-    for i, prod in enumerate(product_order[:-1]): # Exclude 'Total Money Management' from logic
+    for i, prod in enumerate(product_order[:-1]): 
         if new_checkboxes[i] != st.session_state.overrides[prod]:
             st.session_state.overrides[prod] = new_checkboxes[i]
             st.rerun()
@@ -370,7 +354,7 @@ with tab2:
         st.plotly_chart(fig2, use_container_width=True)
 
     
-        st.markdown("### **Week-on-Week Actual NR Trend ($M)**")
+    st.markdown("### **Week-on-Week Actual NR Trend ($M)**")
     chart_pivot = df_daily.pivot_table(index='Product', columns='ISO_Week', values='act', aggfunc='sum').fillna(0) / 1000000
     chart_pivot.loc['Total Money Management'] = chart_pivot.sum()
     bar_data = chart_pivot.drop('Total Money Management').reset_index().melt(id_vars='Product', var_name='Week', value_name='Actual NR')
@@ -385,18 +369,15 @@ with tab2:
     fig3.update_layout(yaxis_title="Net Revenue ($M)", xaxis_title="Week Number", barmode='stack', margin=dict(t=50),xaxis= dict(tickmode='linear',tick0=1,dtick=1))
     st.plotly_chart(fig3, use_container_width=True)
 
+# --- REFRESHED TAB 3 FOR CSV MANAGEMENT ---
 with tab3:
-    st.markdown("### **Backend Data Management**")
-    st.info("Input your manual adjustments here. Select the correct 'Category' (e.g., Stretch Budget) so it flows to the right column!")
+    st.markdown("### **Manual Adjustment Management**")
+    st.info("Edit adjustments below. To save permanently, download the CSV and sync via VS Code.")
     
-    conn = get_db_connection()
-    df_1times_full = pd.read_sql_query("SELECT * FROM manual_one_times", conn)
-    if df_1times_full.empty:
-        df_1times_full = pd.DataFrame([{"month": "3", "year": "2026", "category": "1-Times", "product": "Connect", "adjustment_amount": 0.0, "comment": "" }])
+    df_all_manual = load_manual_inputs()
     
-    styled_inputs = df_1times_full.style.set_table_styles(table_styles)
-    edited_db = st.data_editor(
-        styled_inputs, 
+    edited_manual_df = st.data_editor(
+        df_all_manual, 
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
@@ -404,12 +385,22 @@ with tab3:
             "category": st.column_config.SelectboxColumn("Category", options=["1-Times", "Stretch Budget", "Bridge Rolling"], required=True),
             "product": st.column_config.SelectboxColumn("Product Line", options=product_order, required=True),
             "month": st.column_config.SelectboxColumn("Month", options=[str(i) for i in range(1, 13)], required=True),
-            "year": st.column_config.SelectboxColumn("Year", options=["2025", "2026", "2027", "2028", "2029", "2030"], required=True),
+            "year": st.column_config.SelectboxColumn("Year", options=[str(y) for y in range(2024, 2031)], required=True),
             "adjustment_amount": st.column_config.NumberColumn("$ Adjustment", format="$%.2f")
         }
     )
-    if st.button("Save to Database"):
-        edited_db.to_sql('manual_one_times', conn, if_exists='replace', index=False)
-        st.success("Database updated successfully!")
-    conn.close()
 
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("Save Locally (Laptop Only)"):
+            edited_manual_df.to_csv(MANUAL_FILE, index=False)
+            st.success("File saved to your local folder!")
+
+    with col_btn2:
+        csv_data = edited_manual_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Updated CSV for Sync",
+            data=csv_data,
+            file_name="data_manual_adj.csv",
+            mime="text/csv",
+        )
