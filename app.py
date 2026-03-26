@@ -295,8 +295,8 @@ format_dict_sec2 = {'1-Times': fmt_m, 'Budget': fmt_m, '2_10': fmt_m, '5_7': fmt
 
 # Forces everything (Headers and Cells) to be Bold and Centered
 table_styles = [
-    dict(selector="th", props=[("text-align", "center"), ("font-weight", "bold"), ("font-size", "12px"),("padding", "5px")]),
-    dict(selector="td", props=[("text-align", "center"),("font-size", "12px"),("padding", "3px")])
+    dict(selector="th", props=[("text-align", "center"), ("font-weight", "bold"), ("font-size", "14px")]),
+    dict(selector="td", props=[("text-align", "center"),("font-size", "12px"),("min-width", "80px"),("width", "80px")])
 ]
 
 # --- LAYOUT: UI TABS ---
