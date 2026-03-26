@@ -28,7 +28,7 @@ pt = pytz.timezone('America/Los_Angeles')
 refresh_time = datetime.datetime.now(pt).strftime("%Y-%m-%d %I:%M %p")
 #user_name = getpass.getuser()
 #user_name = st.experimental_user.get("email", "Local User")
-user_name = st.user.get("email", "Local User")
+#user_name = st.user.get("email", "Local User")
 
 st.sidebar.markdown(f"**Last Sync:** `{refresh_time} PT`")
 #st.sidebar.markdown(f"**Refreshed By:** `{user_name}`")
