@@ -1,4 +1,34 @@
 month,year,category,product,adjustment_amount,comment
-3,2026,1-Times,Connect,0.0,Initial Setup
-3,2026,Stretch Budget,Stretch,0.0,Initial Setup
-3,2026,Bridge Rolling,Bridge,0.0,Initial Setup
+1,2026,Stretch Budget,Stretch,2530458,Money Manangement Stretch
+2,2026,Stretch Budget,Stretch,2530866,Money Manangement Stretch
+3,2026,Stretch Budget,Stretch,1853250,Money Manangement Stretch
+4,2026,Stretch Budget,Stretch,1785792,Money Manangement Stretch
+5,2026,Stretch Budget,Stretch,1818673,Money Manangement Stretch
+6,2026,Stretch Budget,Stretch,1852005,Money Manangement Stretch
+7,2026,Stretch Budget,Stretch,1814480,Money Manangement Stretch
+8,2026,Stretch Budget,Stretch,1726652,Money Manangement Stretch
+9,2026,Stretch Budget,Stretch,1870999,Money Manangement Stretch
+10,2026,Stretch Budget,Stretch,1920729,Money Manangement Stretch
+11,2026,Stretch Budget,Stretch,1867217,Money Manangement Stretch
+12,2026,Stretch Budget,Stretch,1952878,Money Manangement Stretch
+11,2025,Bridge Rolling,Bridge,4857790,Populate with Bridge +1 month rolling forecast
+12,2025,Bridge Rolling,Bridge,4857790,Bridge Adj
+11,2025,1-Times,Connect,416000,RfP accrual from October
+12,2025,1-Times,Bridge,-349000,Plasma
+12,2025,1-Times,Issuing,-688000,Q2 EMEA Incentive Reversal(missed the reversal in November)
+12,2025,1-Times,Issuing,366453,OOP Celtic incentive - October bank fee reduction flowing through in cost true-up
+12,2025,1-Times,Bridge,1586327,COGS reclass
+12,2025,1-Times,Bridge,-949000,Partner incentive share catch-up
+12,2025,1-Times,Bridge,-949000,Merchant liabilities catch-up
+1,2026,1-Times,Bridge,-300000,One-time payment reversal
+1,2026,1-Times,Capital,-100000,"Per Srija, Capital tracking for $100k miss"
+1,2026,1-Times,Connect,500000,RfP not being pulled until end of month
+1,2026,1-Times,Instant Payouts,650000,Adjustment to align closer to payouts tracking while daily pacing logic is being investigated
+1,2026,1-Times,Connect,-1400000,Tax costs hitting in Jan
+2,2026,1-Times,Connect,-1400000,Tax cost entry showing reversal on Feb 4 (aka inflating net revenue reporting)
+2,2026,1-Times,Multicurrency Settlement,-500000,Amazon Refund
+2,2026,1-Times,Instant Payouts,3500000,Mastercard incentives from 2023-2025
+2,2026,1-Times,Issuing,200000,unhydrated RIDs
+2,2026,1-Times,Other BaaS Products,140000,CorpCard Incentives from Q3 & Q4 25
+3,2026,1-Times,Multicurrency Settlement,-700000,Temp Hedge
+3,2026,1-Times,Capital,-400000,Temp Hedge
