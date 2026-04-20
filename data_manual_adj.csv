@@ -26,10 +26,10 @@ month,year,category,product,adjustment_amount,comment,is_gross_revenue
 1,2026,1-Times,Instant Payouts,650000.0,Adjustment to align closer to payouts tracking while daily pacing logic is being investigated,False
 1,2026,1-Times,Connect,-1400000.0,Tax costs hitting in Jan,False
 2,2026,1-Times,Connect,-1400000.0,Tax cost entry showing reversal on Feb 4 (aka inflating net revenue reporting),False
-2,2026,1-Times,Multicurrency Settlement,-500000.0,Amazon Refund,False
+2,2026,1-Times,MCS & ICC,-500000.0,Amazon Refund,False
 2,2026,1-Times,Instant Payouts,3500000.0,Mastercard incentives from 2023-2025,False
 2,2026,1-Times,Issuing,200000.0,unhydrated RIDs,False
 2,2026,1-Times,Other BaaS Products,140000.0,CorpCard Incentives from Q3 & Q4 25,False
-3,2026,1-Times,Multicurrency Settlement,-700000.0,Temp Hedge,False
+3,2026,1-Times,MCS & ICC,-700000.0,Temp Hedge,False
 3,2026,1-Times,Capital,-1400000.0,Temp Hedge (mix shift towards lower margin c4p/intl and sold YTD),False
-4,2026,1-Times,Connect,-500000.0,test,False
+4,2026,1-Times,Connect,-500000.0,test,True
