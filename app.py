@@ -1,3 +1,21 @@
+# ============================================================
+# Weekly Revenue Dashboard  v2.5
+# Changes vs v2.4:
+#   1.  Removed all st.caption() callouts below section headers
+#   2.  CLR_GREEN → #00b050 (proper visible green)
+#   3.  Center-align headers + cells with !important + global CSS
+#   4.  ACT=FCST OVERRIDE hidden for Total MM & Implied EOM rows;
+#       %VtB/%VtF show "N/A" on Implied End of Month
+#   5.  WoW header → "Week-on-Week Progression ($M)" (no date prefix)
+#   6.  Sparklines rendered inline in Trend column of WoW HTML table;
+#       separate "Product-wise Sparklines" section removed
+#   7.  Removed "Weekly NR Actuals (Solid) vs Estimated (Hatched)" chart
+#   8.  NR vs GR: data labels on bar chart; take-rate y-axis fixed
+#   9.  Budget Pacing: follows product_order, On Track first,
+#       gradient green (dark = above expected, light = near expected)
+#  10.  NR vs GR Comparison moved to very end of Insights tab
+# ============================================================
+
 import streamlit as st
 import pandas as pd
 import datetime
@@ -7,419 +25,1085 @@ import os
 import warnings
 import plotly.express as px
 import pytz
-import getpass
 import plotly.graph_objects as go
 
-# Suppress background terminal warnings
 warnings.filterwarnings('ignore', category=UserWarning)
+st.set_page_config(layout="wide", page_title="Weekly Revenue Dashboard")
 
-st.set_page_config(layout="wide", page_title="Weekly NR Dashboard")
+# ── Global CSS: force center-alignment in ALL st.dataframe tables ──
+st.markdown("""
+<style>
+[data-testid="stDataFrame"] table thead tr th {
+    text-align: center !important;
+    font-weight: bold !important;
+}
+[data-testid="stDataFrame"] table tbody tr td {
+    text-align: center !important;
+}
+[data-testid="stDataFrame"] th {
+    text-align: center !important;
+}
+[data-testid="stDataFrame"] td {
+    text-align: center !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# --- FILE PATH FOR MANUAL INPUTS ---
-MANUAL_FILE = 'data_manual_adj.csv'
+# ============================================================
+# FILE PATHS
+# ============================================================
+_HERE       = os.path.dirname(os.path.abspath(__file__))
+MANUAL_FILE = os.path.join(_HERE, 'data_manual_adj.csv')
+FILE_MM     = os.path.join(_HERE, 'Data_MM_Connect_Gross_Net.csv')
+FILE_ISS    = os.path.join(_HERE, 'Data_Issuing_Gross_Net.csv')
+FILE_BR_NET = os.path.join(_HERE, 'Data_Bridge_Other_Net.csv')
+FILE_BR_GRS = os.path.join(_HERE, 'Data_Bridge_Other_Gross.csv')
 
-# --- UI CONTROLS (Sidebar) ---
+# ============================================================
+# COLOUR CONSTANTS
+# ============================================================
+CLR_GREEN = "#00b050"   # positive / favourable  (visible green)
+CLR_RED   = "#ff0000"   # negative / unfavourable
+
+# ============================================================
+# FORECAST VERSION MAPPING
+# ============================================================
+FCST_DISPLAY_TO_KEY = {
+    "Budget": "bud",
+    "2+10":   "2_10",
+    "5+7":    "5_7",
+    "8+4":    "8_4",
+}
+FCST_OPTIONS = list(FCST_DISPLAY_TO_KEY.keys())
+
+# ============================================================
+# CONSTANTS
+# ============================================================
+product_order = [
+    "Connect", "Instant Payouts", "MCS & ICC", "Capital",
+    "Issuing", "Bridge", "Faster Payouts", "Global Payouts",
+    "Treasury", "Other BaaS Products", "Stretch", "Total Money Management"
+]
+prorate_prods = [
+    "Bridge", "Faster Payouts", "Global Payouts",
+    "Treasury", "Other BaaS Products", "Stretch"
+]
+prod_norm = {k.lower(): k for k in product_order}
+
+PROD_ALIASES = {
+    "mass payouts":             "Global Payouts",
+    "financial accounts":       "Treasury",
+    "multicurrency settlement": "MCS & ICC",
+}
+
+def normalise_product(raw_series):
+    lower = raw_series.astype(str).str.strip().str.lower()
+    return lower.map(PROD_ALIASES).fillna(lower.map(prod_norm)).fillna(
+        raw_series.astype(str).str.strip())
+
+PFMAP_NR = {
+    "Connect": FILE_MM, "Instant Payouts": FILE_MM,
+    "MCS & ICC": FILE_MM, "Capital": FILE_MM,
+    "Issuing": FILE_ISS,
+    "Bridge": FILE_BR_NET, "Faster Payouts": FILE_BR_NET,
+    "Global Payouts": FILE_BR_NET, "Treasury": FILE_BR_NET,
+    "Other BaaS Products": FILE_BR_NET,
+}
+PFMAP_GR = {
+    "Connect": FILE_MM, "Instant Payouts": FILE_MM,
+    "MCS & ICC": FILE_MM, "Capital": FILE_MM,
+    "Issuing": FILE_ISS,
+    "Bridge": FILE_BR_GRS, "Faster Payouts": FILE_BR_GRS,
+    "Global Payouts": FILE_BR_GRS, "Treasury": FILE_BR_GRS,
+    "Other BaaS Products": FILE_BR_GRS,
+}
+
+# ============================================================
+# AUTO-DETECT LAST ACTUAL DATE
+# ============================================================
+def parse_dates_simple(col):
+    raw   = col.astype(str)
+    clean = raw.apply(lambda x: x.split(' GMT')[0].strip() if ' GMT' in x else x)
+    return pd.to_datetime(clean, errors='coerce').dt.normalize()
+
+def detect_last_actual_date():
+    today = datetime.date.today()
+    if not os.path.exists(FILE_MM):
+        return today, False
+    try:
+        df = pd.read_csv(FILE_MM)
+        df.columns = (df.columns.astype(str)
+                      .str.replace(r'[^a-zA-Z0-9_]', '', regex=True)
+                      .str.lower().str.strip())
+        act_col, dat_col = 'daily_actual_net_revenue', 'reporting_date'
+        if act_col not in df.columns or dat_col not in df.columns:
+            return today, False
+        df['_date'] = parse_dates_simple(df[dat_col])
+        df['_act']  = pd.to_numeric(
+            df[act_col].astype(str)
+              .str.replace(r'[\$,()]', '', regex=True).str.strip(),
+            errors='coerce').fillna(0).abs()
+        has_data = df[df['_act'] > 0]
+        if has_data.empty:
+            return today, False
+        return has_data['_date'].max().date(), True
+    except Exception:
+        return today, False
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 st.sidebar.header("Dashboard Settings")
-forecast_version = st.sidebar.selectbox("Forecast Version", ["Budget", "2_10", "5_7", "8_4"])
-as_of_date = st.sidebar.date_input("As-Of Date", datetime.date(2026, 3, 17))
 
-# --- LAST REFRESHED INFO ---
-pt = pytz.timezone('America/Los_Angeles')
+forecast_display = st.sidebar.selectbox("Forecast Version", FCST_OPTIONS)
+forecast_csv_key = FCST_DISPLAY_TO_KEY[forecast_display]
+forecast_version = forecast_csv_key
+
+_last_act_date, _ = detect_last_actual_date()
+
+as_of_date = st.sidebar.date_input(
+    "As-Of Date",
+    value=_last_act_date,
+    help="Defaults to last date with actual data in Data_MM_Connect_Gross_Net.csv."
+)
+
+pt           = pytz.timezone('America/Los_Angeles')
 refresh_time = datetime.datetime.now(pt).strftime("%Y-%m-%d %I:%M %p")
-
 st.sidebar.markdown(f"**Last Sync:** `{refresh_time} PT`")
 
 start_of_month = as_of_date.replace(day=1)
-days_in_month = calendar.monthrange(as_of_date.year, as_of_date.month)[1]
-end_of_month = as_of_date.replace(day=days_in_month)
+days_in_month  = calendar.monthrange(as_of_date.year, as_of_date.month)[1]
+end_of_month   = as_of_date.replace(day=days_in_month)
 prorate_factor = as_of_date.day / days_in_month
 
-product_order = [
-    "Connect", "Instant Payouts", "Multicurrency Settlement", "Capital",
-    "Issuing", "Bridge", "Faster Payouts", "Mass Payouts",
-    "Financial Accounts", "Other BaaS Products", "Stretch", "Total Money Management"
+# ============================================================
+# FORMATTING HELPERS
+# ============================================================
+def clean_money(series):
+    if series.dtype == 'object':
+        s   = series.astype(str).str.replace('$', '', regex=False)\
+                                 .str.replace(',', '', regex=False).str.strip()
+        neg = s.str.startswith('(') & s.str.endswith(')')
+        s   = s.str.replace('(', '', regex=False).str.replace(')', '', regex=False)
+        num = pd.to_numeric(s, errors='coerce').fillna(0)
+        return np.where(neg, -num, num)
+    return pd.to_numeric(series, errors='coerce').fillna(0)
+
+def parse_dates(col):
+    raw   = col.astype(str)
+    clean = raw.apply(lambda x: x.split(' GMT')[0].strip() if ' GMT' in x else x)
+    return pd.to_datetime(clean, errors='coerce').dt.normalize()
+
+def fmt_m(v):
+    try:
+        f = float(v)
+        return "$0.0M" if np.isnan(f) else f"${f:.1f}M"
+    except: return "$0.0M"
+
+def fmt_p(v):
+    """Ratio → '12.5%'; NaN → '0.0%'."""
+    try:
+        f = float(v)
+        return "0.0%" if np.isnan(f) else f"{f*100:.1f}%"
+    except: return "0.0%"
+
+def fmt_p_na(v):
+    """Ratio → '12.5%'; NaN → 'N/A'  (used for Implied EOM row)."""
+    try:
+        f = float(v)
+        if np.isnan(f): return "N/A"
+        return f"{f*100:.1f}%"
+    except: return "N/A"
+
+def fmt_pct_complete(v):
+    try:
+        f = float(v) * 100
+        return "0%" if np.isnan(f) else f"{f:.0f}%"
+    except: return "0%"
+
+# ── Colour helpers ────────────────────────────────────────────
+def color_pct_var(val):
+    try:
+        if pd.isna(val) or val in ("", "N/A"): return ''
+        s = str(val).replace('%', '').strip()
+        v = float(s)
+        if '%' not in str(val): v = v * 100
+        if v < 0: return f'color:{CLR_RED}; font-weight:bold;'
+        if v > 0: return f'color:{CLR_GREEN}; font-weight:bold;'
+        return ''
+    except: return ''
+
+def color_dollar_var(val):
+    try:
+        if pd.isna(val) or val == "": return ''
+        s = str(val).replace('$', '').replace('M', '').strip()
+        v = float(s)
+        if v < 0: return f'color:{CLR_RED}; font-weight:bold;'
+        if v > 0: return f'color:{CLR_GREEN}; font-weight:bold;'
+        return ''
+    except: return ''
+
+def color_delta(val):
+    try:
+        if pd.isna(val) or val == "": return ''
+        s = str(val).replace('$', '').replace('M', '').strip()
+        v = float(s)
+        if v < 0: return f'color:{CLR_RED}; font-weight:bold;'
+        if v > 0: return f'color:{CLR_GREEN}; font-weight:bold;'
+        return ''
+    except: return ''
+
+def hl_totals(row):
+    if row.get('Product', '') in ['Total Money Management', 'Implied End of Month']:
+        return ['font-weight:bold; background-color:#f1f3f4;'] * len(row)
+    return [''] * len(row)
+
+# ── Table CSS — center-aligned with !important ────────────────
+TBL_STYLE = [
+    dict(selector="th",
+         props=[("text-align",        "center !important"),
+                ("font-weight",       "bold"),
+                ("font-size",         "13px"),
+                ("white-space",       "nowrap"),
+                ("background-color",  "#f8f9fa")]),
+    dict(selector="td",
+         props=[("text-align",        "center !important"),
+                ("font-size",         "12px"),
+                ("min-width",         "75px"),
+                ("padding",           "4px 8px")]),
+    dict(selector="th.col_heading",
+         props=[("text-align", "center !important")]),
+    dict(selector="td.data",
+         props=[("text-align", "center !important")]),
 ]
-prorate_rule_products = ["Bridge", "Faster Payouts", "Mass Payouts", "Financial Accounts", "Other BaaS Products", "Stretch"]
 
-product_file_mapping = {
-    "Connect": "data_mm_connect.csv", "Instant Payouts": "data_mm_connect.csv",
-    "Multicurrency Settlement": "data_mm_connect.csv", "Capital": "data_mm_connect.csv",
-    "Issuing": "data_issuing.csv",
-    "Bridge": "data_bridge_other.csv", "Faster Payouts": "data_bridge_other.csv",
-    "Mass Payouts": "data_bridge_other.csv", "Financial Accounts": "data_bridge_other.csv",
-    "Other BaaS Products": "data_bridge_other.csv"
-}
+FMT_S1 = {'Actual': fmt_m, 'Budget': fmt_m, 'Forecast': fmt_m,
+           '%VtB': fmt_p, '%VtF': fmt_p}
+FMT_S3 = {'Actual': fmt_m, 'Budget': fmt_m, 'Forecast': fmt_m,
+           '%VtB': fmt_p, '%VtF': fmt_p, '$VtB': fmt_m, '$VtF': fmt_m}
+FMT_S3_FOOT = {'Actual': fmt_m, 'Budget': fmt_m, 'Forecast': fmt_m,
+               '%VtB': fmt_p_na, '%VtF': fmt_p_na, '$VtB': fmt_m, '$VtF': fmt_m}
+FMT_S2 = {'1-Times': fmt_m, 'Budget': fmt_m,
+           '2+10': fmt_m, '5+7': fmt_m, '8+4': fmt_m, 'Rolling': fmt_m}
 
-prod_normalization_map = {k.lower(): k for k in product_order}
+# ============================================================
+# SVG SPARKLINE  (for WoW Trend column)
+# ============================================================
+def make_svg_sparkline(values, width=110, height=38):
+    """Return an inline SVG line chart string."""
+    try:
+        vals = [float(v) if not (isinstance(v, float) and np.isnan(v)) else 0.0
+                for v in values]
+    except Exception:
+        return "<span>→</span>"
+    if len(vals) < 2:
+        return "<span>→</span>"
 
-# --- NEW MANUAL DATA LOADER ---
-def load_manual_inputs():
+    mn, mx = min(vals), max(vals)
+    rng    = mx - mn if mx != mn else max(abs(mx), 0.001)
+    pad    = 5
+    w, h   = width - 2*pad, height - 2*pad
+
+    def sx(i): return pad + int(i * w / (len(vals) - 1))
+    def sy(v): return pad + int((1 - (v - mn) / rng) * h)
+
+    pts   = " ".join(f"{sx(i)},{sy(v)}" for i, v in enumerate(vals))
+    color = CLR_GREEN if vals[-1] >= vals[0] else CLR_RED
+    lx, ly = sx(len(vals) - 1), sy(vals[-1])
+
+    return (f'<svg width="{width}" height="{height}" '
+            f'xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle">'
+            f'<polyline points="{pts}" fill="none" stroke="{color}" '
+            f'stroke-width="2" stroke-linejoin="round"/>'
+            f'<circle cx="{lx}" cy="{ly}" r="3" fill="{color}"/>'
+            f'</svg>')
+
+# ============================================================
+# WoW HTML TABLE  (with inline SVG sparklines in Trend column)
+# ============================================================
+def render_wow_html(wow_tbl, wow_lbls, wow_piv):
+    if wow_tbl.empty or not wow_lbls:
+        st.info("No weekly data available for this month.")
+        return
+
+    TH = ("background:#f8f9fa;text-align:center !important;padding:6px 10px;"
+          "font-weight:bold;border:1px solid #dee2e6;font-size:13px;white-space:nowrap")
+    TD = "text-align:center !important;padding:4px 8px;border:1px solid #dee2e6;font-size:12px"
+    TD_L = "text-align:left !important;padding:4px 10px;border:1px solid #dee2e6;font-size:12px"
+
+    cols = ['Product'] + wow_lbls + ['Δ (CW vs PW)', 'Trend']
+
+    html = '<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%">'
+    html += '<thead><tr>'
+    for c in cols:
+        html += f'<th style="{TH}">{c}</th>'
+    html += '</tr></thead><tbody>'
+
+    for _, row in wow_tbl.iterrows():
+        is_total = row['Product'] == 'Total Money Management'
+        extra    = 'font-weight:bold;background-color:#f1f3f4;' if is_total else ''
+
+        html += '<tr>'
+        html += f'<td style="{TD_L};{extra}">{row["Product"]}</td>'
+
+        for lbl in wow_lbls:
+            v = row.get(lbl, 0)
+            try: vf = float(v)
+            except: vf = 0.0
+            html += f'<td style="{TD};{extra}">{fmt_m(vf)}</td>'
+
+        dv = 0.0
+        try: dv = float(row.get('Δ (CW vs PW)', 0))
+        except: pass
+        dc = CLR_GREEN if dv > 0 else (CLR_RED if dv < 0 else '#000000')
+        html += (f'<td style="{TD};color:{dc};font-weight:bold;{extra}">'
+                 f'{fmt_m(dv)}</td>')
+
+        svg = '<span style="color:#888">—</span>'
+        if not wow_piv.empty and row['Product'] in wow_piv.index:
+            weeks_sorted = sorted(wow_piv.columns)
+            vals = [wow_piv.loc[row['Product'], w] for w in weeks_sorted]
+            svg  = make_svg_sparkline(vals)
+        html += f'<td style="{TD};{extra}">{svg}</td>'
+
+        html += '</tr>'
+
+    html += '</tbody></table></div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+# ============================================================
+# MANUAL INPUTS
+# ============================================================
+def load_manual():
     if os.path.exists(MANUAL_FILE):
         df = pd.read_csv(MANUAL_FILE)
         df['month'] = df['month'].astype(str).str.strip()
-        df['year'] = df['year'].astype(str).str.strip()
+        df['year']  = df['year'].astype(str).str.strip()
+        if 'is_gross_revenue' not in df.columns:
+            df['is_gross_revenue'] = False
+        df['is_gross_revenue'] = df['is_gross_revenue'].fillna(False).astype(bool)
         return df
-    else:
-        return pd.DataFrame(columns=["month", "year", "category", "product", "adjustment_amount", "comment"])
+    return pd.DataFrame(columns=["month","year","category","product",
+                                  "adjustment_amount","comment","is_gross_revenue"])
 
-# --- DATA CLEANING ENGINE ---
-def clean_money(series):
-    if series.dtype == 'object':
-        s = series.astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip()
-        mask_neg = s.str.startswith('(') & s.str.endswith(')')
-        s = s.str.replace('(', '', regex=False).str.replace(')', '', regex=False)
-        num = pd.to_numeric(s, errors='coerce').fillna(0)
-        return np.where(mask_neg, -num, num)
-    return pd.to_numeric(series, errors='coerce').fillna(0)
-
-# --- DATA LOADER ---
-def load_real_csv_data(target_date, fcst_ver):
-    all_data = []
-    file_mappings = {
-        'data_mm_connect.csv': {'act': 'daily_actual_net_revenue', 'bud': 'estimated_fy26_budget', '2_10': 'estimated_fy25_2_10_forecast', '5_7': 'estimated_fy25_5_7_forecast', '8_4': 'estimated_fy25_8_4_forecast'},
-        'data_bridge_other.csv': {'act': 'daily_actual_net_revenue', 'bud': 'estimated_fy26_budget', '2_10': 'estimated_fy25_2_10_forecast', '5_7': 'estimated_fy25_5_7_forecast', '8_4': 'estimated_fy25_8_4_forecast'},
-        'data_issuing.csv': {'act': 'tmbl_actuals', 'bud': 'estimated_tmbl_based_on_budget', '2_10': 'estimated_tmbl_based_on_reforecast_2_plus_10', '5_7': 'estimated_tmbl_based_on_reforecast_5_plus_7', '8_4': 'estimated_tmbl_based_on_reforecast_8_plus_4'}
-    }
-    for file, cols in file_mappings.items():
-        if os.path.exists(file):
-            df = pd.read_csv(file)
-            df.columns = df.columns.astype(str).str.replace(r'[^a-zA-Z0-9_]', '', regex=True).str.lower()
-            date_col = 'reporting_date' if 'reporting_date' in df.columns else None
-            prod_col = 'product_grouping' if 'product_grouping' in df.columns else 'product_pillar' if 'product_pillar' in df.columns else None
-            if date_col and prod_col:
-                
-                # Clean out Google Drive's strange timezone text before parsing
-                raw_dates = df[date_col].astype(str)
-                clean_dates = raw_dates.apply(lambda x: x.split(' GMT')[0].strip() if ' GMT' in x else x)
-                
-                # Convert the cleaned string directly to a normalized Pandas timestamp
-                df['reporting_date_clean'] = pd.to_datetime(clean_dates, errors='coerce').dt.normalize()
-                
-                temp = pd.DataFrame()
-                temp['reporting_date'] = df['reporting_date_clean']
-                raw_prods = df[prod_col].astype(str).str.strip().str.lower()
-                temp['Product'] = raw_prods.map(prod_normalization_map).fillna(df[prod_col].astype(str).str.strip())
-                temp['source_file'] = file
-                for tgt, src in cols.items():
-                    if src in df.columns:
-                        temp[tgt] = clean_money(df[src])
-                    else:
-                        if tgt == 'bud' and 'estimated_fy25_budget' in df.columns:
-                            temp[tgt] = clean_money(df['estimated_fy25_budget'])
-                        else:
-                            temp[tgt] = 0.0
-                all_data.append(temp)
-                
-    if not all_data:
-        return pd.DataFrame(), pd.DataFrame(), False, pd.DataFrame()
-        
-    master_df = pd.concat(all_data, ignore_index=True)
-    
-    # Re-enforce the Timestamp formatting after concat
-    master_df['reporting_date'] = pd.to_datetime(master_df['reporting_date'], errors='coerce').dt.normalize()
-    
-    # Convert the Python sidebar dates into equivalent Pandas Timestamps
+# ============================================================
+# DATA LOADER
+# ============================================================
+def load_data(target_date, fcst_ver, rev_type='NR'):
+    all_data  = []
     target_ts = pd.to_datetime(target_date).normalize()
-    start_ts = target_ts.replace(day=1)
-    end_ts = pd.to_datetime(end_of_month).normalize()
-    
-    master_df['valid'] = False
-    for prod, f in product_file_mapping.items():
-        master_df.loc[(master_df['Product'] == prod) & (master_df['source_file'] == f), 'valid'] = True
-    master_df = master_df[master_df['valid']]
-    
-    # Filter matches
-    exact_date_df = master_df[master_df['reporting_date'] == target_ts]
-    date_has_actuals = abs(exact_date_df['act'].sum()) > 0
-    
-    mtd_daily_df = master_df[(master_df['reporting_date'] >= start_ts) & (master_df['reporting_date'] <= target_ts)].copy()
-    mtd_agg = mtd_daily_df.groupby('Product').sum(numeric_only=True).reset_index()
-    mtd_agg['Forecast'] = mtd_agg[fcst_ver] if fcst_ver in mtd_agg.columns else mtd_agg['bud']
-    mtd_agg.rename(columns={'bud': 'Budget', 'act': 'Actual'}, inplace=True)
-    
-    full_df = master_df[(master_df['reporting_date'] >= start_ts) & (master_df['reporting_date'] <= end_ts)]
-    full_agg = full_df.groupby('Product').sum(numeric_only=True).reset_index()
-    full_agg.rename(columns={'bud': 'Budget', 'act': 'Actual'}, inplace=True)
-    
-    return mtd_agg.set_index('Product'), full_agg.set_index('Product'), date_has_actuals, mtd_daily_df
+    start_ts  = target_ts.replace(day=1)
+    end_ts    = pd.to_datetime(end_of_month).normalize()
+    pfmap     = PFMAP_NR if rev_type == 'NR' else PFMAP_GR
 
-# Load Data
-df_mtd, df_full, date_has_actuals, df_daily = load_real_csv_data(as_of_date, forecast_version)
-df_mtd = df_mtd.reindex(product_order).fillna(0)
-df_full = df_full.reindex(product_order).fillna(0)
+    def _base(df, prod_c, src):
+        t = pd.DataFrame()
+        t['reporting_date'] = parse_dates(df['reporting_date'])
+        t['Product']        = normalise_product(df[prod_c])
+        t['source_file']    = src
+        return t
 
-# --- DYNAMIC TRUE/FALSE CHECK IN SIDEBAR ---
-if date_has_actuals:
-    st.sidebar.markdown(f"**Date Has Actuals:** <span style='color:green; background-color:#d4edda; padding: 2px 5px; border-radius: 3px; font-weight:bold;'>TRUE</span>", unsafe_allow_html=True)
-else:
-    st.sidebar.markdown(f"**Date Has Actuals:** <span style='color:#721c24; background-color:#f8d7da; padding: 2px 5px; border-radius: 3px; font-weight:bold;'>FALSE</span>", unsafe_allow_html=True)
-    st.sidebar.markdown("*If 'FALSE' variances are inaccurate because daily Budget/Forecast and Actuals are not populated for consistent days. Use an earlier As-Of Date.*")
+    if os.path.exists(FILE_MM):
+        df = pd.read_csv(FILE_MM)
+        df.columns = (df.columns.astype(str)
+                      .str.replace(r'[^a-zA-Z0-9_]', '', regex=True)
+                      .str.lower().str.strip())
+        pc = 'product_grouping' if 'product_grouping' in df.columns else 'product_pillar'
+        t  = _base(df, pc, FILE_MM)
+        if rev_type == 'NR':
+            t['act']  = clean_money(df['daily_actual_net_revenue'])            if 'daily_actual_net_revenue'            in df.columns else 0.0
+            t['bud']  = clean_money(df['estimated_fy26_budget_net_revenue'])    if 'estimated_fy26_budget_net_revenue'   in df.columns else 0.0
+            t['2_10'] = clean_money(df['estimated_2_10_forecast_net_revenue'])  if 'estimated_2_10_forecast_net_revenue' in df.columns else 0.0
+            t['5_7']  = clean_money(df['estimated_5_7_forecast_net_revenue'])   if 'estimated_5_7_forecast_net_revenue'  in df.columns else 0.0
+            t['8_4']  = clean_money(df['estimated_8_4_forecast_net_revenue'])   if 'estimated_8_4_forecast_net_revenue'  in df.columns else 0.0
+        else:
+            t['act']  = clean_money(df['daily_actual_gross_revenue'])            if 'daily_actual_gross_revenue'            in df.columns else 0.0
+            t['bud']  = clean_money(df['estimated_fy26_budget_gross_revenue'])    if 'estimated_fy26_budget_gross_revenue'   in df.columns else 0.0
+            t['2_10'] = clean_money(df['estimated_2_10_forecast_gross_revenue'])  if 'estimated_2_10_forecast_gross_revenue' in df.columns else 0.0
+            t['5_7']  = clean_money(df['estimated_5_7_forecast_gross_revenue'])   if 'estimated_5_7_forecast_gross_revenue'  in df.columns else 0.0
+            t['8_4']  = clean_money(df['estimated_8_4_forecast_gross_revenue'])   if 'estimated_8_4_forecast_gross_revenue'  in df.columns else 0.0
+        all_data.append(t)
 
-# --- MANUAL INPUTS FROM CSV ---
-df_inputs = load_manual_inputs()
-mask = (df_inputs['month'] == str(as_of_date.month)) & (df_inputs['year'] == str(as_of_date.year))
-current_inputs = df_inputs[mask]
+    if os.path.exists(FILE_ISS):
+        df = pd.read_csv(FILE_ISS)
+        df.columns = (df.columns.astype(str)
+                      .str.replace(r'[^a-zA-Z0-9_]', '', regex=True)
+                      .str.lower().str.strip())
+        pc = 'product_group' if 'product_group' in df.columns else 'product_pillar'
+        t  = _base(df, pc, FILE_ISS)
+        if rev_type == 'NR':
+            t['act']  = clean_money(df['net_revenue_actual'])        if 'net_revenue_actual'        in df.columns else 0.0
+            t['bud']  = clean_money(df['net_revenue_budget'])        if 'net_revenue_budget'        in df.columns else 0.0
+            t['2_10'] = clean_money(df['net_revenue_2_10_forecast']) if 'net_revenue_2_10_forecast' in df.columns else 0.0
+            t['5_7']  = clean_money(df['net_revenue_5_7_forecast'])  if 'net_revenue_5_7_forecast'  in df.columns else 0.0
+            t['8_4']  = clean_money(df['net_revenue_8_4_forecast'])  if 'net_revenue_8_4_forecast'  in df.columns else 0.0
+        else:
+            t['act']  = clean_money(df['gross_revenue_actual'])        if 'gross_revenue_actual'        in df.columns else 0.0
+            t['bud']  = clean_money(df['gross_revenue_budget'])        if 'gross_revenue_budget'        in df.columns else 0.0
+            t['2_10'] = clean_money(df['gross_revenue_2_10_forecast']) if 'gross_revenue_2_10_forecast' in df.columns else 0.0
+            t['5_7']  = clean_money(df['gross_revenue_5_7_forecast'])  if 'gross_revenue_5_7_forecast'  in df.columns else 0.0
+            t['8_4']  = clean_money(df['gross_revenue_8_4_forecast'])  if 'gross_revenue_8_4_forecast'  in df.columns else 0.0
+        all_data.append(t)
 
-one_times_dict = current_inputs[current_inputs['category'] == '1-Times'].groupby('product')['adjustment_amount'].sum().to_dict()
-stretch_bud_val = current_inputs[(current_inputs['category'] == 'Stretch Budget') & (current_inputs['product'] == 'Stretch')]['adjustment_amount'].sum()
-bridge_rolling_val = current_inputs[(current_inputs['category'] == 'Bridge Rolling') & (current_inputs['product'] == 'Bridge')]['adjustment_amount'].sum()
+    bf   = FILE_BR_NET if rev_type == 'NR' else FILE_BR_GRS
+    acol = 'daily_actual_net_revenue' if rev_type == 'NR' else 'daily_actual_gross_revenue'
+    if os.path.exists(bf):
+        df = pd.read_csv(bf)
+        df.columns = (df.columns.astype(str)
+                      .str.replace(r'[^a-zA-Z0-9_]', '', regex=True)
+                      .str.lower().str.strip())
+        pc = 'product_grouping' if 'product_grouping' in df.columns else 'product_pillar'
+        t  = _base(df, pc, bf)
+        t['act']  = clean_money(df[acol])                           if acol                           in df.columns else 0.0
+        t['bud']  = clean_money(df['estimated_fy26_budget'])        if 'estimated_fy26_budget'        in df.columns else 0.0
+        t['2_10'] = clean_money(df['estimated_fy26_2_10_forecast']) if 'estimated_fy26_2_10_forecast' in df.columns else 0.0
+        t['5_7']  = clean_money(df['estimated_fy26_5_7_forecast'])  if 'estimated_fy26_5_7_forecast'  in df.columns else 0.0
+        t['8_4']  = clean_money(df['estimated_fy26_8_4_forecast'])  if 'estimated_fy26_8_4_forecast'  in df.columns else 0.0
+        all_data.append(t)
 
-# --- DATA PROCESSING ---
-sec1 = df_mtd.copy()
-sec1['VtB'] = np.where(sec1['Budget'] == 0, 0, (sec1['Actual'] / sec1['Budget']) - 1)
-sec1['VtF'] = np.where(sec1['Forecast'] == 0, 0, (sec1['Actual'] / sec1['Forecast']) - 1)
+    if not all_data:
+        empty = pd.DataFrame()
+        return empty, empty, False, empty
 
-sec2 = pd.DataFrame(index=product_order)
-sec2['1-Times'] = sec2.index.map(one_times_dict).fillna(0)
-sec2['Budget'] = df_full['Budget']
-sec2['2_10'] = df_full['2_10'] if '2_10' in df_full.columns else 0
-sec2['5_7'] = df_full['5_7'] if '5_7' in df_full.columns else 0
-sec2['8_4'] = df_full['8_4'] if '8_4' in df_full.columns else 0
-sec2['Rolling'] = 0.0
+    master = pd.concat(all_data, ignore_index=True)
+    master['reporting_date'] = pd.to_datetime(master['reporting_date'],
+                                              errors='coerce').dt.normalize()
+    master['_ok'] = False
+    for prod, f in pfmap.items():
+        master.loc[(master['Product']==prod) & (master['source_file']==f), '_ok'] = True
+    master = master[master['_ok']].drop(columns='_ok')
 
-sec2.loc['Stretch', 'Budget'] = stretch_bud_val
-sec2.loc['Bridge', 'Rolling'] = bridge_rolling_val
-bridge_rolling = sec2.loc['Bridge', 'Rolling']
-if bridge_rolling != 0:
-    sec2.loc['Bridge', '1-Times'] += (bridge_rolling - sec2.loc['Bridge', forecast_version])
+    has_act = abs(master[master['reporting_date']==target_ts]['act'].sum()) > 0
 
-if 'overrides' not in st.session_state:
-    st.session_state.overrides = {prod: False for prod in product_order}
+    mtd_raw = master[(master['reporting_date']>=start_ts) &
+                     (master['reporting_date']<=target_ts)].copy()
+    mtd_agg = mtd_raw.groupby('Product').sum(numeric_only=True).reset_index()
 
-sec3 = pd.DataFrame(index=product_order)
-sec3['Budget'] = np.where((sec3.index.isin(prorate_rule_products)) & (sec1['Budget'] == 0), sec2['Budget'] * prorate_factor, sec1['Budget'])
-sec3['Forecast'] = np.where((sec3.index.isin(prorate_rule_products)) & (sec1['Forecast'] == 0), sec2[forecast_version] * prorate_factor, sec1['Forecast'])
-
-actual_if_override = sec3['Forecast'] + sec2['1-Times']
-actual_no_override = sec1['Actual'] + (sec2['1-Times'] * prorate_factor)
-override_mask = [st.session_state.overrides.get(p, False) for p in sec3.index]
-sec3['Actual'] = np.where(override_mask, actual_if_override, actual_no_override)
-
-sec3['VtB'] = np.where(sec3['Budget'] == 0, 0, (sec3['Actual'] / sec3['Budget']) - 1)
-sec3['VtF'] = np.where(sec3['Forecast'] == 0, 0, (sec3['Actual'] / sec3['Forecast']) - 1)
-sec3['ACT=FCST OVERRIDE'] = override_mask
-
-# --- IGNORE NON-NUMERIC COLUMNS ---
-for df_temp in [sec1, sec2, sec3]:
-    numeric_cols = df_temp.select_dtypes(include=[np.number]).columns
-    df_temp.loc['Total Money Management', numeric_cols] = df_temp.drop('Total Money Management', errors='ignore')[numeric_cols].sum()
-
-for df_temp in [sec1, sec3]:
-    tot_act = df_temp.loc['Total Money Management', 'Actual']
-    tot_bud = df_temp.loc['Total Money Management', 'Budget']
-    tot_fct = df_temp.loc['Total Money Management', 'Forecast']
-    df_temp.loc['Total Money Management', 'VtB'] = (tot_act / tot_bud) - 1 if tot_bud != 0 else 0
-    df_temp.loc['Total Money Management', 'VtF'] = (tot_act / tot_fct) - 1 if tot_fct != 0 else 0
-
-implied_budget = sec2.loc['Total Money Management', 'Budget']
-implied_vtb_total = sec3.loc['Total Money Management', 'VtB']
-implied_actual = implied_budget * (1 + implied_vtb_total)
-implied_forecast = sec2.loc['Total Money Management', 'Budget'] if forecast_version == "Budget" else sec2.loc['Total Money Management', forecast_version]
-
-# --- CONCATENATION FOR STABILITY ---
-implied_row = pd.DataFrame([{
-    "Actual": implied_actual, "Budget": implied_budget, "Forecast": implied_forecast,
-    "VtB": np.nan, "VtF": np.nan, "ACT=FCST OVERRIDE": False
-}], index=["Implied End of Month"])
-
-sec3 = pd.concat([sec3, implied_row])
-sec3.loc['Total Money Management', 'ACT=FCST OVERRIDE'] = False
-
-# Scale to Millions
-for col in ['Actual', 'Budget', 'Forecast']:
-    sec1[col] = sec1[col] / 1000000
-    sec3[col] = sec3[col] / 1000000
-for col in ['1-Times', 'Budget', '2_10', '5_7', '8_4', 'Rolling']:
-    sec2[col] = sec2[col] / 1000000
-
-# Copy unformatted data for charts
-chart_df = sec3.copy().drop(['Implied End of Month'], errors='ignore').reset_index(names='Product')
-
-sec1.reset_index(names='Product', inplace=True)
-sec2.reset_index(names='Product', inplace=True)
-sec3.reset_index(names='Product', inplace=True)
-
-cols_sec1 = ['Product', 'Actual', 'Budget', 'Forecast', 'VtB', 'VtF']
-cols_sec2 = ['Product', '1-Times', 'Budget', '2_10', '5_7', '8_4', 'Rolling']
-cols_sec3 = ['Product', 'Actual', 'Budget', 'Forecast', 'VtB', 'VtF', 'ACT=FCST OVERRIDE']
-
-sec1 = sec1[cols_sec1]
-sec2 = sec2[cols_sec2]
-sec3 = sec3[cols_sec3]
-
-# --- WoW ENGINE (FIXED INDEXING) ---
-if not df_daily.empty:
-    df_daily['reporting_date'] = pd.to_datetime(df_daily['reporting_date'])
-    df_daily['ISO_Week'] = df_daily['reporting_date'].dt.isocalendar().week
-    wow_pivot = df_daily.pivot_table(index='Product', columns='ISO_Week', values='act', aggfunc='sum').reindex(product_order).fillna(0)
-    wow_pivot.loc['Total Money Management'] = wow_pivot.sum()
-    wow_pivot = wow_pivot / 1000000
-    weeks = sorted(wow_pivot.columns)
-    
-    if len(weeks) >= 2:
-        wow_df = pd.DataFrame(index=wow_pivot.index)
-        wow_df['Prev Week'] = wow_pivot[weeks[-2]]
-        wow_df['Current Week'] = wow_pivot[weeks[-1]]
-        wow_df['Week Delta'] = wow_df['Current Week'] - wow_df['Prev Week']
-        wow_df['WoW %'] = np.where(wow_df['Prev Week'] == 0, 0, (wow_df['Current Week'] / wow_df['Prev Week']) - 1)
-        wow_df['Trend'] = wow_df['WoW %'].apply(lambda x: "📈" if x > 0.01 else "📉" if x < -0.01 else "➡️")
-        
-        # --- THE FIX: Converting 'Product' from an index back to a standard column ---
-        wow_df = wow_df.reset_index(names='Product') 
+    if fcst_ver in mtd_agg.columns:
+        mtd_agg['Forecast'] = mtd_agg[fcst_ver]
+    elif fcst_ver == 'bud':
+        mtd_agg['Forecast'] = mtd_agg.get('bud', 0)
     else:
-        wow_df = pd.DataFrame({'Product': product_order, 'Prev Week': 0.0, 'Current Week': 0.0, 'Week Delta': 0.0, 'WoW %': 0.0, 'Trend': "🆕"})
-else:
-    wow_df = pd.DataFrame({'Product': product_order, 'Prev Week': 0.0, 'Current Week': 0.0, 'Week Delta': 0.0, 'WoW %': 0.0, 'Trend': "➡️"})
+        mtd_agg['Forecast'] = 0.0
 
+    mtd_agg.rename(columns={'bud':'Budget','act':'Actual',
+                             '2_10':'2+10','5_7':'5+7','8_4':'8+4'}, inplace=True)
 
-# --- FORMATTING RULES ---
-def fmt_m(val):
-    if val == "" or val is None or pd.isna(val): return "$0.0M"
-    try: return f"${float(val):.1f}M"
-    except: return "$0.0M"
+    fm_raw = master[(master['reporting_date']>=start_ts) &
+                    (master['reporting_date']<=end_ts)]
+    fm_agg = fm_raw.groupby('Product').sum(numeric_only=True).reset_index()
+    fm_agg.rename(columns={'bud':'Budget','act':'Actual',
+                            '2_10':'2+10','5_7':'5+7','8_4':'8+4'}, inplace=True)
 
-def fmt_p(val):
-    if val == "" or val is None or pd.isna(val): return "0%"
-    try: return f"{float(val) * 100:.0f}%"
-    except: return "0%"
+    return (mtd_agg.set_index('Product'),
+            fm_agg.set_index('Product'),
+            has_act,
+            master[(master['reporting_date']>=start_ts) &
+                   (master['reporting_date']<=end_ts)].copy())
 
-def color_variances(val):
-    try:
-        if pd.isna(val) or val == "": return ''
-        v = float(str(val).replace('%', '').replace(',', ''))
-        if v < 0: return 'color: #d32f2f; font-weight: bold;'
-        elif v > 0: return 'color: #388e3c; font-weight: bold;'
-        return ''
-    except:
-        return ''
+# ============================================================
+# DATA PROCESSING
+# ============================================================
+def process(df_mtd, df_full, fcst_ver, ones_dict, stretch_bud, bridge_roll, ovr_key):
+    KEY_TO_DISPLAY = {'2_10':'2+10','5_7':'5+7','8_4':'8+4','bud':'Budget'}
+    fcst_display   = KEY_TO_DISPLAY.get(fcst_ver, fcst_ver)
 
-def highlight_totals(row):
-    if row['Product'] in ['Total Money Management', 'Implied End of Month']:
-        return ['font-weight: bold; background-color: #f1f3f4;'] * len(row)
-    return [''] * len(row)
+    s1 = df_mtd.copy().reindex(product_order).fillna(0)
+    if 'Forecast' not in s1.columns: s1['Forecast'] = s1.get(fcst_display, 0)
+    if 'Budget'   not in s1.columns: s1['Budget']   = 0.0
+    if 'Actual'   not in s1.columns: s1['Actual']   = 0.0
+    s1['%VtB'] = np.where(s1['Budget']!=0,   s1['Actual']/s1['Budget']-1,   0)
+    s1['%VtF'] = np.where(s1['Forecast']!=0, s1['Actual']/s1['Forecast']-1, 0)
 
-format_dict_sec13 = {'Actual': fmt_m, 'Budget': fmt_m, 'Forecast': fmt_m, 'VtB': fmt_p, 'VtF': fmt_p}
-format_dict_sec2 = {'1-Times': fmt_m, 'Budget': fmt_m, '2_10': fmt_m, '5_7': fmt_m, '8_4': fmt_m, 'Rolling': fmt_m}
+    df_f = df_full.copy().reindex(product_order).fillna(0)
+    s2 = pd.DataFrame(index=product_order)
+    s2['1-Times'] = pd.Series({p: ones_dict.get(p, 0) for p in product_order})
+    s2['Budget']  = df_f.get('Budget', pd.Series(0, index=product_order))
+    s2['2+10']    = df_f.get('2+10',   pd.Series(0, index=product_order))
+    s2['5+7']     = df_f.get('5+7',    pd.Series(0, index=product_order))
+    s2['8+4']     = df_f.get('8+4',    pd.Series(0, index=product_order))
+    s2['Rolling'] = 0.0
+    s2.loc['Stretch', 'Budget']  = stretch_bud
+    s2.loc['Bridge',  'Rolling'] = bridge_roll
+    if bridge_roll != 0:
+        fc_s2 = fcst_display if fcst_display in s2.columns else 'Budget'
+        s2.loc['Bridge', '1-Times'] += bridge_roll - s2.loc['Bridge', fc_s2]
 
-table_styles = [
-    dict(selector="th", props=[("text-align", "center"), ("font-weight", "bold"), ("font-size", "14px")]),
-    dict(selector="td", props=[("text-align", "center"),("font-size", "12px"),("min-width", "80px"),("width", "80px")])
-]
+    if ovr_key not in st.session_state:
+        st.session_state[ovr_key] = {p: False for p in product_order}
+    ovr     = st.session_state[ovr_key]
+    fc_full = s2[fcst_display] if fcst_display in s2.columns else s2['Budget']
 
-# --- LAYOUT: UI TABS ---
-tab1, tab2, tab3 = st.tabs(["📊 Financial Summary", "📈 Insights & WoW Trends", "⚙️ Manual Data Inputs"])
+    s3 = pd.DataFrame(index=product_order)
+    s3['Budget']   = np.where(
+        s1.index.isin(prorate_prods) & (s1['Budget']==0),
+        s2['Budget']*prorate_factor, s1['Budget'])
+    s3['Forecast'] = np.where(
+        s1.index.isin(prorate_prods) & (s1['Forecast']==0),
+        fc_full*prorate_factor, s1['Forecast'])
+    omask        = [ovr.get(p, False) for p in s3.index]
+    s3['Actual'] = np.where(omask,
+                            s3['Forecast'] + s2['1-Times'],
+                            s1['Actual']   + s2['1-Times']*prorate_factor)
+    s3['%VtB'] = np.where(s3['Budget']!=0,   s3['Actual']/s3['Budget']-1,   0)
+    s3['%VtF'] = np.where(s3['Forecast']!=0, s3['Actual']/s3['Forecast']-1, 0)
+    s3['$VtB'] = s3['Actual'] - s3['Budget']
+    s3['$VtF'] = s3['Actual'] - s3['Forecast']
+    s3['ACT=FCST OVERRIDE'] = omask
 
-with tab1:
-    st.markdown("### **MTD Raw Data**")
-    styled_sec1 = sec1.style.format(format_dict_sec13)\
-        .map(color_variances, subset=['VtB', 'VtF'])\
-        .apply(highlight_totals, axis=1)\
-        .set_table_styles(table_styles)
-    st.dataframe(styled_sec1, hide_index=True, use_container_width=True)
+    for df_t in [s1, s2, s3]:
+        nc = df_t.select_dtypes(include=np.number).columns
+        df_t.loc['Total Money Management', nc] = (
+            df_t.drop('Total Money Management', errors='ignore')[nc].sum())
 
-    st.markdown("### **Overlays (Full Month)**")
-    styled_sec2 = sec2.style.format(format_dict_sec2)\
-        .apply(highlight_totals, axis=1)\
-        .set_table_styles(table_styles)
-    st.dataframe(styled_sec2, hide_index=True, use_container_width=True)
+    for df_t in [s1, s3]:
+        ta = df_t.loc['Total Money Management', 'Actual']
+        tb = df_t.loc['Total Money Management', 'Budget']
+        tf = df_t.loc['Total Money Management', 'Forecast']
+        df_t.loc['Total Money Management', '%VtB'] = (ta/tb-1) if tb!=0 else 0
+        df_t.loc['Total Money Management', '%VtF'] = (ta/tf-1) if tf!=0 else 0
 
-    st.markdown("### **MTD with 1-Times Overlay**")
-    styled_sec3 = sec3.style.format(format_dict_sec13)\
-        .map(color_variances, subset=['VtB', 'VtF'])\
-        .apply(highlight_totals, axis=1)\
-        .set_table_styles(table_styles)
-    edited_sec3 = st.data_editor(
-        styled_sec3,
-        column_order=cols_sec3,
-        column_config={"ACT=FCST OVERRIDE": st.column_config.CheckboxColumn("ACT=FCST OVERRIDE", default=False)},
-        disabled=['Product', 'Actual', 'Budget', 'Forecast', 'VtB', 'VtF'],
-        hide_index=True,
-        use_container_width=True,
-        key="editor_sec3"
+    s3.loc['Total Money Management', '$VtB'] = (
+        s3.loc['Total Money Management', 'Actual'] -
+        s3.loc['Total Money Management', 'Budget'])
+    s3.loc['Total Money Management', '$VtF'] = (
+        s3.loc['Total Money Management', 'Actual'] -
+        s3.loc['Total Money Management', 'Forecast'])
+
+    i_bud = s2.loc['Total Money Management', 'Budget']
+    i_vtb = s3.loc['Total Money Management', '%VtB']
+    i_act = i_bud * (1 + i_vtb)
+    i_fc  = (s2.loc['Total Money Management', fcst_display]
+             if fcst_display in s2.columns else i_bud)
+    impl = pd.DataFrame([{
+        'Actual':i_act, 'Budget':i_bud, 'Forecast':i_fc,
+        '%VtB':np.nan, '%VtF':np.nan,
+        '$VtB':i_act-i_bud, '$VtF':i_act-i_fc,
+        'ACT=FCST OVERRIDE':False
+    }], index=['Implied End of Month'])
+    s3 = pd.concat([s3, impl])
+    s3.loc['Total Money Management', 'ACT=FCST OVERRIDE'] = False
+
+    for c in ['Actual', 'Budget', 'Forecast']:
+        s1[c] /= 1e6
+    for c in ['1-Times','Budget','2+10','5+7','8+4','Rolling']:
+        if c in s2.columns: s2[c] /= 1e6
+    for c in ['Actual','Budget','Forecast','$VtB','$VtF']:
+        s3[c] /= 1e6
+
+    return (s1.reset_index(names='Product'),
+            s2.reset_index(names='Product'),
+            s3.reset_index(names='Product'))
+
+# ============================================================
+# WoW ENGINE
+# ============================================================
+def compute_wow(df_full_daily):
+    if df_full_daily is None or df_full_daily.empty:
+        dummy = pd.DataFrame({'Product': product_order+['Total Money Management']})
+        return dummy, [], pd.DataFrame()
+    d = df_full_daily.copy()
+    d['reporting_date'] = pd.to_datetime(d['reporting_date'])
+    d['WOM'] = d['reporting_date'].apply(lambda x: (x.day-1)//7+1)
+    pivot = (d.pivot_table(index='Product', columns='WOM',
+                           values='act', aggfunc='sum')
+              .reindex(product_order).fillna(0))
+    pivot.loc['Total Money Management'] = pivot.sum()
+    pivot /= 1e6
+    weeks = sorted(pivot.columns)
+    tbl, labels = pd.DataFrame(index=pivot.index), []
+    for i, w in enumerate(weeks):
+        lbl = ('Current Week' if i==len(weeks)-1
+               else 'Prev Week' if i==len(weeks)-2
+               else f'Week {i+1}')
+        tbl[lbl] = pivot[w]; labels.append(lbl)
+    tbl['Δ (CW vs PW)'] = tbl.get('Current Week', 0) - tbl.get('Prev Week', 0)
+    tbl['Trend'] = ''
+    return tbl.reset_index(names='Product'), labels, pivot
+
+# ============================================================
+# WEEKLY PROGRESSION
+# ============================================================
+def compute_weekly_progression(df_full_daily, fcst_ver, full_df_idx):
+    if df_full_daily is None or df_full_daily.empty:
+        return pd.DataFrame(), [], []
+    d = df_full_daily.copy()
+    d['reporting_date'] = pd.to_datetime(d['reporting_date'])
+    d['WOM'] = d['reporting_date'].apply(lambda x: (x.day-1)//7+1)
+    all_weeks = sorted(d['WOM'].unique())
+    result, col_meta = pd.DataFrame(index=product_order), []
+    est_col = fcst_ver if fcst_ver in d.columns else 'bud'
+    for w in all_weeks:
+        wk = d[d['WOM']==w]
+        act_by_prod = wk.groupby('Product')['act'].sum().reindex(product_order).fillna(0)
+        has_act     = act_by_prod.abs().sum() > 0
+        if has_act:
+            cname = f"W{w} Actual"; result[cname] = act_by_prod
+        else:
+            est = (wk.groupby('Product')[est_col].sum().reindex(product_order).fillna(0)
+                   if est_col in wk.columns else pd.Series(0.0, index=product_order))
+            cname = f"W{w} Est."; result[cname] = est
+        col_meta.append((cname, has_act))
+    fm = full_df_idx.copy().reindex(product_order).fillna(0)
+    result['Full Month Budget'] = fm.get('Budget', pd.Series(0, index=product_order))
+    actual_cols = [c for c, a in col_meta if a]
+    result['MTD Actual'] = result[actual_cols].sum(axis=1) if actual_cols else 0.0
+    result['$ To Go']    = result['Full Month Budget'] - result['MTD Actual']
+    result['% Complete'] = np.where(result['Full Month Budget']!=0,
+                                    result['MTD Actual']/result['Full Month Budget'], 0.0)
+    week_cols = [c for c, _ in col_meta]
+    for c in week_cols + ['Full Month Budget','MTD Actual','$ To Go']:
+        result.loc['Total Money Management', c] = (
+            result.drop('Total Money Management', errors='ignore')[c].sum())
+    tm_a = result.loc['Total Money Management','MTD Actual']
+    tm_b = result.loc['Total Money Management','Full Month Budget']
+    result.loc['Total Money Management','% Complete'] = (tm_a/tm_b if tm_b!=0 else 0.0)
+    result[week_cols + ['Full Month Budget','MTD Actual','$ To Go']] /= 1e6
+    return result.reset_index(names='Product'), col_meta, week_cols
+
+# ============================================================
+# FINANCIAL VIEW
+# ============================================================
+def render_view(s1, s2, s3, ovr_key, label):
+    C1 = ['Product','Actual','Budget','Forecast','%VtB','%VtF']
+    C2 = ['Product','1-Times','Budget','2+10','5+7','8+4','Rolling']
+    C3_EDIT = ['Product','Actual','Budget','Forecast','%VtB','%VtF','$VtB','$VtF','ACT=FCST OVERRIDE']
+    C3_FOOT = ['Product','Actual','Budget','Forecast','%VtB','%VtF','$VtB','$VtF']
+
+    def _ens(df, cols, dfl=None):
+        dfl = dfl or {}
+        for c in cols:
+            if c not in df.columns: df[c] = dfl.get(c, 0.0)
+        return df[cols]
+
+    s1 = _ens(s1.copy(), C1)
+    s2 = _ens(s2.copy(), C2)
+    s3 = _ens(s3.copy(), C3_EDIT, {'ACT=FCST OVERRIDE': False})
+
+    # ── Section 1: MTD Raw ──────────────────────────────────
+    st.markdown(f"### MTD Raw Data — {label}")
+    st.dataframe(
+        s1.style
+          .format(FMT_S1)
+          .map(color_pct_var, subset=['%VtB','%VtF'])
+          .apply(hl_totals, axis=1)
+          .set_table_styles(TBL_STYLE),
+        hide_index=True, use_container_width=True)
+
+    # ── Section 2: Full-Month Overlay ───────────────────────
+    st.markdown(f"### Overlays — Full Month ({label})")
+    st.dataframe(
+        s2.style
+          .format(FMT_S2)
+          .apply(hl_totals, axis=1)
+          .set_table_styles(TBL_STYLE),
+        hide_index=True, use_container_width=True)
+
+    # ── Section 3: MTD + 1-Times ─────────────────────────────
+    st.markdown(f"### MTD with 1-Times Overlay ({label})")
+
+    footer_prods = ['Total Money Management', 'Implied End of Month']
+    mask_edit = ~s3['Product'].isin(footer_prods)
+    s3_edit = s3[mask_edit].copy()
+    s3_foot = s3[~mask_edit].copy()
+
+    implied_mask = s3_foot['Product'] == 'Implied End of Month'
+    s3_foot.loc[implied_mask, '%VtB'] = np.nan
+    s3_foot.loc[implied_mask, '%VtF'] = np.nan
+
+    styled_edit = (
+        s3_edit[C3_EDIT].style
+          .format(FMT_S3, subset=['Actual','Budget','Forecast','%VtB','%VtF','$VtB','$VtF'])
+          .map(color_pct_var,    subset=['%VtB','%VtF'])
+          .map(color_dollar_var, subset=['$VtB','$VtF'])
+          .set_table_styles(TBL_STYLE)
     )
-    # --- PREVENT INFINITE RERUN ---
-    new_checkboxes = edited_sec3['ACT=FCST OVERRIDE'].tolist()
-    changed = False
-    for i, prod in enumerate(product_order[:-1]):
-        if new_checkboxes[i] != st.session_state.overrides.get(prod, False):
-            st.session_state.overrides[prod] = new_checkboxes[i]
-            changed = True
+    edited = st.data_editor(
+        styled_edit,
+        column_order=C3_EDIT,
+        column_config={
+            "ACT=FCST OVERRIDE": st.column_config.CheckboxColumn(
+                "ACT=FCST OVERRIDE", default=False,
+                help="Sets Actual = Forecast + 1-Times for this product")
+        },
+        disabled=['Product','Actual','Budget','Forecast',
+                  '%VtB','%VtF','$VtB','$VtF'],
+        hide_index=True, use_container_width=True,
+        key=f"editor_{label.lower().replace(' ','_').replace('/','_')}"
+    )
+
+    new_chk   = edited['ACT=FCST OVERRIDE'].tolist()
+    prod_list = edited['Product'].tolist()
+    changed   = False
+    for i, prod in enumerate(prod_list):
+        if prod in product_order[:-1]:
+            nv = bool(new_chk[i]) if i < len(new_chk) else False
+            if nv != st.session_state[ovr_key].get(prod, False):
+                st.session_state[ovr_key][prod] = nv
+                changed = True
     if changed:
         st.rerun()
 
-with tab2:
-    st.markdown("### **Week-on-Week Progression ($M)**")
-    wow_format = {'Prev Week': fmt_m, 'Current Week': fmt_m, 'Week Delta': fmt_m, 'WoW %': fmt_p}
-    styled_wow = wow_df.style.format(wow_format).map(color_variances, subset=['Week Delta', 'WoW %']).apply(highlight_totals, axis=1).set_table_styles(table_styles)
-    st.dataframe(styled_wow, hide_index=True, use_container_width=True)
+    st.dataframe(
+        s3_foot[C3_FOOT].style
+          .format(FMT_S3_FOOT,
+                  subset=['Actual','Budget','Forecast','%VtB','%VtF','$VtB','$VtF'])
+          .map(color_pct_var,    subset=['%VtB','%VtF'])
+          .map(color_dollar_var, subset=['$VtB','$VtF'])
+          .apply(hl_totals, axis=1)
+          .set_table_styles(TBL_STYLE),
+        hide_index=True, use_container_width=True)
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+df_manual = load_manual()
+mask_m    = ((df_manual['month']==str(as_of_date.month)) &
+             (df_manual['year'] ==str(as_of_date.year)))
+cur_m     = df_manual[mask_m]
+
+nr_ones = (cur_m[(cur_m['category']=='1-Times') &
+                 (~cur_m['is_gross_revenue'].astype(bool))]
+           .groupby('product')['adjustment_amount'].sum().to_dict())
+gr_ones = (cur_m[(cur_m['category']=='1-Times') &
+                 (cur_m['is_gross_revenue'].astype(bool))]
+           .groupby('product')['adjustment_amount'].sum().to_dict())
+stretch_bud = cur_m[(cur_m['category']=='Stretch Budget') &
+                    (cur_m['product']=='Stretch')]['adjustment_amount'].sum()
+bridge_roll = cur_m[(cur_m['category']=='Bridge Rolling') &
+                    (cur_m['product']=='Bridge')]['adjustment_amount'].sum()
+
+mtd_nr, full_nr, has_act_nr, daily_nr = load_data(as_of_date, forecast_version, 'NR')
+mtd_gr, full_gr, has_act_gr, daily_gr = load_data(as_of_date, forecast_version, 'GR')
+
+_detected_last, _csv_found = detect_last_actual_date()
+
+def _badge(ok, lbl):
+    clr = CLR_GREEN if ok else CLR_RED
+    bg  = '#d4edda'  if ok else '#ffd5d5'
+    txt = 'TRUE'     if ok else 'FALSE'
+    st.sidebar.markdown(
+        f"**{lbl}:** <span style='color:{clr}; background-color:{bg}; "
+        f"padding:2px 6px; border-radius:3px; font-weight:bold;'>{txt}</span>",
+        unsafe_allow_html=True)
+
+_badge(has_act_nr, "NR Date Has Actuals")
+_badge(has_act_gr, "GR Date Has Actuals")
+
+if _csv_found:
+    st.sidebar.markdown(
+        f"<small>📅 Last actual: <b>{_detected_last.strftime('%d %b %Y')}</b></small>",
+        unsafe_allow_html=True)
+else:
+    st.sidebar.markdown("<small>⚠️ CSV not found</small>", unsafe_allow_html=True)
+
+if not has_act_nr:
+    st.sidebar.markdown(
+        f"*No actuals for {as_of_date}. Try {_detected_last.strftime('%d %b %Y')} or earlier.*")
+
+for k in ['overrides_nr','overrides_gr']:
+    if k not in st.session_state:
+        st.session_state[k] = {p: False for p in product_order}
+
+s1_nr, s2_nr, s3_nr = process(mtd_nr, full_nr, forecast_version,
+                               nr_ones, stretch_bud, bridge_roll, 'overrides_nr')
+s1_gr, s2_gr, s3_gr = process(mtd_gr, full_gr, forecast_version,
+                               gr_ones, stretch_bud, bridge_roll, 'overrides_gr')
+wow_tbl, wow_lbls, wow_piv = compute_wow(daily_nr)
+prog_tbl, prog_meta, prog_week_cols = compute_weekly_progression(
+    daily_nr, forecast_version, full_nr)
+
+# ============================================================
+# TABS
+# ============================================================
+tab_nr, tab_gr, tab_ins, tab_man = st.tabs([
+    "📊 NR View", "💰 GR View", "📈 Insights & WoW Trends", "⚙️ Manual Data Inputs"
+])
+
+with tab_nr:
+    render_view(s1_nr, s2_nr, s3_nr, 'overrides_nr', 'Net Revenue')
+
+with tab_gr:
+    render_view(s1_gr, s2_gr, s3_gr, 'overrides_gr', 'Gross Revenue')
+
+with tab_ins:
+
+    # ── 1. Week-on-Week Progression (HTML table + inline sparklines) ──
+    st.markdown("### Week-on-Week Progression ($M)")
+    render_wow_html(wow_tbl, wow_lbls, wow_piv)
+
     st.divider()
-    
-    st.markdown("### **Visual Insights (MTD with Overlays)**")
-    col1, col2 = st.columns(2)
-    compare_col = 'Budget' if forecast_version == 'Budget' else 'Forecast'
-    var_col, var_name = ('VtB', 'VtB') if forecast_version == 'Budget' else ('VtF', 'VtF')
 
-    with col1:
-        df_melt = chart_df.melt(id_vars='Product', value_vars=['Actual', compare_col], var_name='Metric', value_name='Net Revenue ($M)')
-        fig1 = px.bar(df_melt, x='Product', y='Net Revenue ($M)', color='Metric', barmode='group', title=f"MTD Actuals vs {compare_col}", text_auto='.1f', color_discrete_sequence=['#1f77b4', '#aec7e8'])
-        fig1.update_traces(textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
-        st.plotly_chart(fig1, use_container_width=True)
+    # ── 2. Weekly Progression Table ─────────────────────────
+    st.markdown("### 📋 Weekly Estimated vs Actual Progression — NR ($M)")
+    lk1, lk2, lk3 = st.columns(3)
+    with lk1:
+        st.markdown(
+            "<span style='background:#d4edda;padding:3px 8px;border-radius:4px;"
+            "font-size:13px;'>🟢 <b>Actual</b> — confirmed NR</span>",
+            unsafe_allow_html=True)
+    with lk2:
+        st.markdown(
+            f"<span style='background:#fff3cd;padding:3px 8px;border-radius:4px;"
+            f"font-size:13px;'>🟡 <b>Est.</b> — projected from {forecast_display}</span>",
+            unsafe_allow_html=True)
+    with lk3:
+        st.markdown(
+            "<span style='background:#ffd5d5;padding:3px 8px;border-radius:4px;"
+            "font-size:13px;'>🔴 <b>$ To Go</b> — remaining vs Budget</span>",
+            unsafe_allow_html=True)
+    st.markdown("")
 
-    with col2:
-        chart_df['Var_Chart'] = pd.to_numeric(chart_df[var_col], errors='coerce').fillna(0) * 100
-        fig2 = px.bar(chart_df, x='Var_Chart', y='Product', orientation='h', title=f"MTD Variance ({var_name} %)", text=chart_df['Var_Chart'].apply(lambda x: f"{x:.1f}%"), color=np.where(chart_df['Var_Chart'] >= 0, 'Favorable', 'Unfavorable'), color_discrete_map={'Favorable': '#388e3c', 'Unfavorable': '#d32f2f'})
-        fig2.update_traces(textposition="outside", cliponaxis=False)
-        st.plotly_chart(fig2, use_container_width=True)
+    if not prog_tbl.empty:
+        actual_cnames = [c for c, a in prog_meta if a]
+        est_cnames    = [c for c, a in prog_meta if not a]
+        prog_fmt = {c: fmt_m for c in prog_week_cols +
+                    ['Full Month Budget','MTD Actual','$ To Go']}
+        prog_fmt['% Complete'] = fmt_pct_complete
 
-    st.markdown("### **Week-on-Week Actual NR Trend ($M)**")
-    
-    if not df_daily.empty and 'ISO_Week' in df_daily.columns:
-        chart_pivot = df_daily.pivot_table(index='Product', columns='ISO_Week', values='act', aggfunc='sum').fillna(0) / 1000000
-        chart_pivot.loc['Total Money Management'] = chart_pivot.sum()
-        bar_data = chart_pivot.drop('Total Money Management').reset_index().melt(id_vars='Product', var_name='Week', value_name='Actual NR')
-        line_data = chart_pivot.loc[['Total Money Management']].reset_index().melt(id_vars='Product', var_name='Week', value_name='Total')
+        def style_progression(df):
+            styles = pd.DataFrame('', index=df.index, columns=df.columns)
+            for c in actual_cnames:
+                if c in df.columns:
+                    styles[c] = 'background-color:#e8f5e9;color:#1b5e20;font-weight:bold;'
+            for c in est_cnames:
+                if c in df.columns:
+                    styles[c] = 'background-color:#fff8e1;color:#e65100;font-style:italic;'
+            if 'Full Month Budget' in df.columns:
+                styles['Full Month Budget'] = 'background-color:#e3f2fd;font-weight:bold;'
+            if 'MTD Actual' in df.columns:
+                styles['MTD Actual'] = 'background-color:#e8f5e9;font-weight:bold;'
+            if '$ To Go' in df.columns:
+                for i, v in enumerate(df['$ To Go']):
+                    try:
+                        num = float(str(v).replace('$','').replace('M',''))
+                        styles.iloc[i, df.columns.get_loc('$ To Go')] = (
+                            f'color:{CLR_RED};font-weight:bold;' if num > 0
+                            else f'color:{CLR_GREEN};font-weight:bold;')
+                    except: pass
+            if '% Complete' in df.columns:
+                for i, v in enumerate(df['% Complete']):
+                    try:
+                        pct = float(str(v).replace('%','')) / 100
+                        clr = (CLR_GREEN      if pct >= prorate_factor * 0.95
+                               else '#f57c00' if pct >= prorate_factor * 0.80
+                               else CLR_RED)
+                        styles.iloc[i, df.columns.get_loc('% Complete')] = (
+                            f'color:{clr};font-weight:bold;')
+                    except: pass
+            for i, p in enumerate(df.get('Product', pd.Series())):
+                if p == 'Total Money Management':
+                    styles.iloc[i] = styles.iloc[i].apply(
+                        lambda x: x + ';font-weight:bold;background-color:#f1f3f4;')
+            return styles
 
-        fig3 = go.Figure()
-        for prod in bar_data['Product'].unique():
-            p_df = bar_data[bar_data['Product'] == prod]
-            fig3.add_trace(go.Bar(x=p_df['Week'], y=p_df['Actual NR'], name=prod, text=p_df['Actual NR'].apply(lambda x: f"{x:.1f}" if x != 0 else ""), textposition='inside', insidetextanchor='middle', textangle=0))
-        fig3.add_trace(go.Scatter(x=line_data['Week'], y=line_data['Total'], name="Total Money Management", mode='lines+markers+text', text=line_data['Total'].apply(lambda x: f"<b>${x:.1f}M</b>"), textposition="top center", line=dict(color='#ff80ff', width=4), marker=dict(size=10, color='#ff80ff'), textfont=dict(color='black', size=11)))
-        fig3.update_traces(texttemplate="<span style='background-color:rgba(255,255,255,0.7); padding:2px'>%{text}</span>", selector=dict(name="Total Money Management"))
-        fig3.update_layout(yaxis_title="Net Revenue ($M)", xaxis_title="Week Number", barmode='stack', margin=dict(t=50),xaxis= dict(tickmode='linear',tick0=1,dtick=1))
-        st.plotly_chart(fig3, use_container_width=True)
+        prog_cols = (['Product'] + prog_week_cols +
+                     ['Full Month Budget','MTD Actual','$ To Go','% Complete'])
+        st.dataframe(
+            prog_tbl[prog_cols].style
+              .format(prog_fmt)
+              .apply(style_progression, axis=None)
+              .set_table_styles(TBL_STYLE),
+            hide_index=True, use_container_width=True)
+
+        total_row = prog_tbl[prog_tbl['Product']=='Total Money Management']
+        if not total_row.empty:
+            st.markdown("")
+            k1, k2, k3, k4 = st.columns(4)
+            mtd_v = total_row['MTD Actual'].values[0]
+            bud_v = total_row['Full Month Budget'].values[0]
+            tog_v = total_row['$ To Go'].values[0]
+            pct_v = total_row['% Complete'].values[0] * 100
+            k1.metric("MTD Actual ($M)",       f"${mtd_v:.1f}M")
+            k2.metric("Full Month Budget ($M)", f"${bud_v:.1f}M")
+            k3.metric("$ To Go ($M)", f"${tog_v:.1f}M",
+                      delta=f"{-tog_v:.1f}M vs budget", delta_color="inverse")
+            k4.metric("% Month Complete", f"{pct_v:.0f}%",
+                      delta=f"vs expected {prorate_factor*100:.0f}%",
+                      delta_color=("normal" if pct_v >= prorate_factor*95 else "inverse"))
     else:
-        st.info("No daily tracking data is available for this date to display week-on-week charts.")
+        st.info("No progression data available. Check that CSVs are loaded correctly.")
 
-# --- REFRESHED TAB 3 FOR CSV MANAGEMENT ---
-with tab3:
-    st.markdown("### **Manual Adjustment Management**")
-    st.info("Edit adjustments below. To save permanently, download the CSV and sync via VS Code.")
-    df_all_manual = load_manual_inputs()
-    edited_manual_df = st.data_editor(
-        df_all_manual,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
+    st.divider()
+
+    # ── 3. Budget Pacing ─────────────────────────────────────
+    st.markdown(
+        f"### 🎯 Budget Pacing — MTD vs Full Month  "
+        f"*(Day {as_of_date.day} of {days_in_month} = {prorate_factor:.0%} elapsed)*")
+
+    pac_rows = []
+    for prod in [p for p in product_order if p != 'Total Money Management']:
+        ma = (s1_nr[s1_nr['Product']==prod]['Actual'].values[0]
+              if not s1_nr[s1_nr['Product']==prod].empty else 0)
+        fb = (s2_nr[s2_nr['Product']==prod]['Budget'].values[0]
+              if not s2_nr[s2_nr['Product']==prod].empty else 0)
+        pac_rows.append({'Product': prod, 'MTD Actual': ma,
+                         'Full Month Budget': fb,
+                         'Pacing': ma / fb if fb != 0 else 0.0})
+
+    pac_df = pd.DataFrame(pac_rows)
+
+    def _pac_status(p):
+        if   p >= prorate_factor:        return 'On Track (Above)'
+        elif p >= prorate_factor * 0.90: return 'On Track (Near)'
+        else:                             return 'Behind'
+
+    pac_df['Status'] = pac_df['Pacing'].apply(_pac_status)
+    status_rank = {'On Track (Above)': 0, 'On Track (Near)': 1, 'Behind': 2}
+    pac_df['_rank'] = pac_df['Status'].map(status_rank)
+    pac_df = pac_df.sort_values(['_rank', 'Pacing'], ascending=[True, False])
+
+    # Reverse for plotly horizontal bar (first item = bottom → On Track at top)
+    y_order = pac_df['Product'].tolist()[::-1]
+
+    color_map = {
+        'On Track (Above)': '#006400',   # dark green
+        'On Track (Near)':  '#90EE90',   # light green
+        'Behind':           CLR_RED,
+    }
+
+    f_pac = px.bar(
+        pac_df, x='Pacing', y='Product', orientation='h',
+        title='NR MTD Pacing vs Full Month Budget',
+        text=pac_df['Pacing'].apply(lambda x: f'{x:.0%}'),
+        color='Status',
+        color_discrete_map=color_map,
+        category_orders={'Product': y_order},
+    )
+    f_pac.add_vline(x=prorate_factor, line_dash='dash', line_color='orange',
+                    annotation_text=f'Expected {prorate_factor:.0%}',
+                    annotation_position='top right')
+    f_pac.update_traces(textposition='outside')
+    f_pac.update_layout(
+        xaxis=dict(tickformat='.0%',
+                   range=[0, max(pac_df['Pacing'].max() * 1.25,
+                                 prorate_factor * 1.5)]),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+        margin=dict(l=10, r=60, t=60, b=10),
+    )
+    st.plotly_chart(f_pac, use_container_width=True)
+
+    st.divider()
+
+    # ── 4. Product Mix ───────────────────────────────────────
+    st.markdown("### 🍩 Product Mix — MTD NR Actual")
+    mix_df = s1_nr[~s1_nr['Product'].isin(['Total Money Management'])].copy()
+    mix_df = mix_df[mix_df['Actual'] > 0]
+    if not mix_df.empty:
+        f_mix = px.pie(mix_df, names='Product', values='Actual',
+                       title='NR Product Mix (MTD Actuals)', hole=0.4,
+                       color_discrete_sequence=px.colors.qualitative.Pastel)
+        f_mix.update_traces(textinfo='label+percent', pull=[0.03]*len(mix_df))
+        st.plotly_chart(f_mix, use_container_width=True)
+
+    st.divider()
+
+    # ── 5. NR vs GR Comparison  (at end) ─────────────────────
+    st.markdown("### 🔁 NR vs GR Comparison — MTD Actuals ($M)")
+
+    ch_nr = s3_nr[~s3_nr['Product'].isin(['Implied End of Month'])].copy()
+    ch_gr = s3_gr[~s3_gr['Product'].isin(['Implied End of Month'])].copy()
+    comp  = (ch_nr[['Product','Actual']].rename(columns={'Actual':'NR Actual'})
+             .merge(ch_gr[['Product','Actual']].rename(columns={'Actual':'GR Actual'}),
+                    on='Product', how='left'))
+    comp['Take Rate'] = np.where(comp['GR Actual'] != 0,
+                                 comp['NR Actual'] / comp['GR Actual'], 0)
+
+    cc1, cc2 = st.columns(2)
+
+    with cc1:
+        m2 = comp.melt(id_vars='Product', value_vars=['NR Actual','GR Actual'],
+                       var_name='Type', value_name='$M')
+        m2['Label'] = m2['$M'].apply(lambda x: f"${x:.1f}M")
+        f_comp = px.bar(m2, x='Product', y='$M', color='Type', barmode='group',
+                        title='MTD: NR vs GR Actuals ($M)',
+                        text='Label',
+                        color_discrete_sequence=['#1f77b4','#ff7f0e'])
+        f_comp.update_traces(textposition='outside', textfont_size=10)
+        f_comp.update_layout(
+            xaxis_tickangle=-35,
+            yaxis=dict(range=[0, m2['$M'].max() * 1.35]),
+            legend=dict(orientation='h', yanchor='bottom', y=1.02),
+            margin=dict(t=60, b=80),
+        )
+        st.plotly_chart(f_comp, use_container_width=True)
+
+    with cc2:
+        cx = comp[comp['Product'] != 'Total Money Management'].copy()
+        cx['TR_Label'] = cx['Take Rate'].apply(lambda x: f"{x:.1%}")
+        max_tr = cx['Take Rate'].max() if not cx.empty else 1.0
+        f_tr = px.bar(cx, x='Product', y='Take Rate',
+                      title='Take Rate by Product (NR ÷ GR)',
+                      text='TR_Label',
+                      color_discrete_sequence=['#9467bd'])
+        f_tr.update_traces(textposition='outside', textfont_size=10)
+        f_tr.update_layout(
+            xaxis_tickangle=-35,
+            yaxis=dict(tickformat='.0%',
+                       range=[0, max(max_tr * 1.40, 0.10)]),
+            margin=dict(t=60, b=80, r=10),
+        )
+        st.plotly_chart(f_tr, use_container_width=True)
+
+with tab_man:
+    st.markdown("### ⚙️ Manual Adjustment Management")
+    st.info(
+        "**1-Times:** unchecked → NR View  |  checked → GR View\n\n"
+        "Stretch Budget & Bridge Rolling apply to both views."
+    )
+    df_all = load_manual()
+    edited_man = st.data_editor(
+        df_all, num_rows='dynamic', use_container_width=True, hide_index=True,
         column_config={
-            "category": st.column_config.SelectboxColumn("Category", options=["1-Times", "Stretch Budget", "Bridge Rolling"], required=True),
-            "product": st.column_config.SelectboxColumn("Product Line", options=product_order, required=True),
-            "month": st.column_config.SelectboxColumn("Month", options=[str(i) for i in range(1, 13)], required=True),
-            "year": st.column_config.SelectboxColumn("Year", options=[str(y) for y in range(2024, 2031)], required=True),
-            "adjustment_amount": st.column_config.NumberColumn("$ Adjustment", format="$%.2f")
+            "category":          st.column_config.SelectboxColumn("Category",
+                                    options=["1-Times","Stretch Budget","Bridge Rolling"],
+                                    required=True),
+            "product":           st.column_config.SelectboxColumn("Product Line",
+                                    options=product_order, required=True),
+            "month":             st.column_config.SelectboxColumn("Month",
+                                    options=[str(i) for i in range(1,13)], required=True),
+            "year":              st.column_config.SelectboxColumn("Year",
+                                    options=[str(y) for y in range(2024,2031)],
+                                    required=True),
+            "adjustment_amount": st.column_config.NumberColumn("$ Adjustment",
+                                    format="$%.2f"),
+            "comment":           st.column_config.TextColumn("Comment"),
+            "is_gross_revenue":  st.column_config.CheckboxColumn("Is Gross Revenue?",
+                                    default=False,
+                                    help="Tick = GR View. Untick = NR View.")
         }
     )
-
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("Save Locally (Laptop Only)"):
-            edited_manual_df.to_csv(MANUAL_FILE, index=False)
-            st.success("File saved to your local folder!")
-
-    with col_btn2:
-        csv_data = edited_manual_df.to_csv(index=False).encode('utf-8')
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        if st.button("💾 Save Locally"):
+            os.makedirs(_HERE, exist_ok=True)
+            edited_man.to_csv(MANUAL_FILE, index=False)
+            st.success("Saved ✅")
+    with bc2:
         st.download_button(
-            label="Download Updated CSV for Sync",
-            data=csv_data,
-            file_name="data_manual_adj.csv",
-            mime="text/csv",
-        )
+            label="⬇️ Download CSV for GitHub Sync",
+            data=edited_man.to_csv(index=False).encode('utf-8'),
+            file_name="data_manual_adj.csv", mime="text/csv")
+    st.divider()
+    st.info("""
+
+**To sync with GitHub after saving:**
+1. Click **Download CSV for GitHub Sync**
+2. Replace `weekly_nr_dashboard/data_manual_adj.csv` on your Desktop
+3. In VS Code terminal:
+
+**3-step workflow after every update:**
+
+1. Edit rows above → click **Download CSV for GitHub Sync**
+2. Replace `weekly_nr_dashboard/data_manual_adj.csv` on your desktop
+3. In VS Code terminal:
+   ```
+   git add weekly_nr_dashboard/data_manual_adj.csv
+   git commit -m "update manual adj"
+   git push
+   ```
+   ✅ Streamlit Cloud auto-redeploys in ~1 minute.
+
+**Auto-push tip:** Add `GITHUB_TOKEN` to Streamlit Secrets and use
+`PyGithub` to push the CSV directly from the dashboard.
+    """)
