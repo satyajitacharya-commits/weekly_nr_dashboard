@@ -31,4 +31,4 @@ month,year,category,product,adjustment_amount,comment
 2,2026,1-Times,Issuing,200000,unhydrated RIDs
 2,2026,1-Times,Other BaaS Products,140000,CorpCard Incentives from Q3 & Q4 25
 3,2026,1-Times,Multicurrency Settlement,-700000,Temp Hedge
-3,2026,1-Times,Capital,-400000,Temp Hedge
+3,2026,1-Times,Capital,-1400000,Temp Hedge (mix shift towards lower margin c4p/intl and sold YTD)
