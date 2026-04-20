@@ -32,4 +32,3 @@ month,year,category,product,adjustment_amount,comment,is_gross_revenue
 2,2026,1-Times,Other BaaS Products,140000.0,CorpCard Incentives from Q3 & Q4 25,False
 3,2026,1-Times,MCS & ICC,-700000.0,Temp Hedge,False
 3,2026,1-Times,Capital,-1400000.0,Temp Hedge (mix shift towards lower margin c4p/intl and sold YTD),False
-4,2026,1-Times,Connect,-500000.0,test,True
