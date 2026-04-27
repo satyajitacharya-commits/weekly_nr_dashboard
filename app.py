@@ -890,7 +890,7 @@ with tab_gr:
 with tab_ins:
 
     # ── 1. WoW Progression ───────────────────────────────────
-    st.markdown("### Week-on-Week Progression ($M)")
+    st.markdown("### ⏩ Week-on-Week Progression ($M)")
     render_wow_html(wow_tbl, wow_lbls, wow_piv)
 
     st.divider()
@@ -983,7 +983,7 @@ with tab_ins:
 
             # Card 3: $ To Go — delta shows % remaining vs the selected version
             k3.metric(
-                "$ To Go ($M)",
+                "To Go ($M)",
                 f"${tog_v:.1f}M",
                 delta=f"{rem_pct:.0f}% remaining vs {forecast_display}",
                 delta_color="inverse",   # red when positive = behind target
@@ -996,7 +996,8 @@ with tab_ins:
                 "% Complete",
                 f"{pct_v:.0f}%",
                 delta=f"{gap_pct:+.0f}pp vs expected {expected_pct:.0f}%",
-                delta_color=("normal" if pct_v >= prorate_factor * 95 else "inverse"),
+                #delta_color=("normal" if pct_v >= prorate_factor * 95 else "inverse"),
+                delta_color="normal"
             )
     else:
         st.info("No progression data available. Check that CSVs are loaded correctly.")
